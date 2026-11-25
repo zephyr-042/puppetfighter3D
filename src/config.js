@@ -43,3 +43,12 @@ export const TEST_FLOOR = {
   hd: 500,             // half depth
   thickness: 20,
 };
+
+// ---- test obstacles (old units)
+export const TEST_BLOCKS = [
+  { x: 0, z: -180, hw: 120, hd: 40, h: 60 },
+  { x: -240, z: 60, hw: 50, hd: 50, h: 24 },
+  { x: -340, z: 60, hw: 50, hd: 50, h: 48 },
+  { x: 240, z: 120, hw: 70, hd: 70, h: 90 },
+];
+
