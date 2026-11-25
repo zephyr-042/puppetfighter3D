@@ -33,19 +33,41 @@ export async function createWorld() {
   controller.setMaxSlopeClimbAngle(Math.PI * 0.3);
   controller.setSlideEnabled(true);
 
-  const player = { body, collider, controller, halfCyl, radius, vy: 0, grounded: false };
+  const player = { body, collider, controller, halfCyl, radius, height: m(PUPPET.height), vy: 0, grounded: false };
   return { RAPIER, world, player };
 }
 
 // Move the capsule by a desired displacement (metres) and report where it ended up.
-export function movePlayer(ctx, dx, dy, dz) {
+// newHeight (optional, metres): resize the capsule to this total height with the FEET staying put. The resize is queued
+// together with the move, so the shape and the new position reach the query structures in the same world step.
+export function movePlayer(ctx, dx, dy, dz, newHeight) {
   const { player } = ctx;
+  if (dy > 0) player.controller.disableSnapToGround();      // never glue a jump back to the floor
+  else player.controller.enableSnapToGround(m(8));
   player.controller.computeColliderMovement(player.collider, { x: dx, y: dy, z: dz });
   const c = player.controller.computedMovement();
   player.grounded = player.controller.computedGrounded();
   const t = player.body.translation();
-  player.body.setNextKinematicTranslation({ x: t.x + c.x, y: t.y + c.y, z: t.z + c.z });
+  let ny = t.y + c.y;
+  if (newHeight !== undefined && Math.abs(newHeight - player.height) > 1e-6) {
+    const hc = Math.max(0.01, (newHeight - 2 * player.radius) / 2);
+    ny += (hc - player.halfCyl);                            // capsule centre moves by half the height change
+    player.collider.setHalfHeight(hc);
+    player.halfCyl = hc; player.height = newHeight;
+  }
+  player.body.setNextKinematicTranslation({ x: t.x + c.x, y: ny, z: t.z + c.z });
   return c;
+}
+
+// Is there room to stand at total height h right now? (static geometry only; the player's own collider is ignored.)
+// The test capsule is a touch smaller than the real one so floors and walls we are merely resting against do not count.
+export function hasHeadroom(ctx, h) {
+  const { RAPIER, world, player } = ctx, t = player.body.translation();
+  const feetY = t.y - player.halfCyl - player.radius;
+  const r = player.radius * 0.9, hc = Math.max(0.01, (h - 2 * r) / 2 - 0.03);
+  const shape = new RAPIER.Capsule(hc, r);
+  const pos = { x: t.x, y: feetY + 0.04 + hc + r, z: t.z };
+  return world.intersectionWithShape(pos, { x: 0, y: 0, z: 0, w: 1 }, shape, undefined, undefined, player.collider) === null;
 }
 
 // Apply the pending kinematic move and update query structures for this tick.
