@@ -31,8 +31,9 @@ export function forwardOf(rig) {
 }
 
 // Place the Three camera: orbit around the pivot (chest height above the feet), pulled in by the boom ray.
-export function updateCamera(rig, camera, ctx, feet, dt) {
-  const px = feet.x, py = feet.y + m(CAM.pivot), pz = feet.z;
+// `pivot` (metres above the feet) drops while sliding so the view sits low to the ground.
+export function updateCamera(rig, camera, ctx, feet, dt, pivot = m(CAM.pivot)) {
+  const px = feet.x, py = feet.y + pivot, pz = feet.z;
   // unit vector from the pivot to the wanted camera position
   const cp = Math.cos(rig.pitch), sp = Math.sin(rig.pitch);
   const bx = Math.sin(rig.yaw) * cp, by = sp, bz = Math.cos(rig.yaw) * cp;
