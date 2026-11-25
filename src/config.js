@@ -46,9 +46,10 @@ export const TEST_FLOOR = {
 
 // ---- test obstacles (old units)
 export const TEST_BLOCKS = [
-  { x: 0, z: -180, hw: 120, hd: 40, h: 60 },
-  { x: -240, z: 60, hw: 50, hd: 50, h: 24 },
-  { x: -340, z: 60, hw: 50, hd: 50, h: 48 },
-  { x: 240, z: 120, hw: 70, hd: 70, h: 90 },
+  { x: 0, z: -180, hw: 120, hd: 40, h: 60, c: 0x80584a },
+  { x: -240, z: 60, hw: 50, hd: 50, h: 24, c: 0x947048 },
+  { x: -340, z: 60, hw: 50, hd: 50, h: 48, c: 0x707882 },
+  { x: 240, z: 120, hw: 70, hd: 70, h: 90, c: 0x626a76 },
 ];
+
 
