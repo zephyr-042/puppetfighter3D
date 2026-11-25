@@ -1,5 +1,5 @@
 // src/render/scene.js
-// RENDER (1/2): the Three.js renderer, lights, test floor + blocks and the placeholder capsule mesh.
+// RENDER (1/2): the Three.js renderer, lights, test floor + blocks and the placeholder capsule mesh (squashes while sliding).
 // Meshes are built from the same config numbers as the physics colliders, so they always match.
 // Loads after: config.js
 
@@ -71,11 +71,18 @@ export function createScene() {
   puppet.add(nose);
   scene.add(puppet);
 
+  // squash / stretch the capsule to the current collider height (metres). Feet stay at the origin.
+  function setPuppetHeight(h) {
+    body.scale.y = h / total;
+    body.position.y = h / 2;
+    nose.position.y = h * 0.8;
+  }
+
   window.addEventListener('resize', () => {
     renderer.setSize(window.innerWidth, window.innerHeight);
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
   });
 
-  return { renderer, scene, camera, puppet };
+  return { renderer, scene, camera, puppet, setPuppetHeight };
 }
