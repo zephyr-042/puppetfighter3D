@@ -1,18 +1,22 @@
 // src/physics/player.js
 // PHYSICS: the player's movement rules as a function of (state, input). Ported verb by verb from the old physics.js.
 // Done so far: progressive momentum run (runT, plain run capped at RUN.max), jump (buffer, coyote time, rise / fall gravity),
-// Quake-style air-strafing (no air drag, no top speed), b-hop landing window, crouch-slide, dash burst. Coming next: pillar orbit.
+// Quake-style air-strafing (no air drag, no top speed), b-hop landing window, crouch-slide, dash burst, double jump,
+// wall-run + wall-kick. Coming next: pillar orbit.
 // Loads after: config.js, physics/world.js
 // Speeds in `state` are in METRES / s (already scaled); config numbers are in old units and go through m().
 
-import { STEP, m, PUPPET, RUN, MOVE, JUMP, BHOP, DASH, SLIDE } from '../config.js';
-import { movePlayer, hasHeadroom } from './world.js';
+import { STEP, m, PUPPET, RUN, MOVE, JUMP, BHOP, DASH, SLIDE, WALLRUN } from '../config.js';
+import { movePlayer, hasHeadroom, detectWall, groundGap } from './world.js';
 
 export function createPlayerState() {
   return { vx: 0, vz: 0, vy: 0, facing: 0, runT: 0, isIt: false, wallHit: false, jumpBuf: 0, coyote: 0,
            sliding: false, height: m(PUPPET.height),
            wasGrounded: true, airT: 0, bhopTimer: 0, bhopChain: 0,
-           dashT: 0, dashCd: 0, dashX: 0, dashZ: 1, dashSpeed: 0 };
+           dashT: 0, dashCd: 0, dashX: 0, dashZ: 1, dashSpeed: 0,
+           airJumpsLeft: JUMP.maxAirJumps,
+           wallRunning: false, wallSide: 0, wallN: { x: 0, z: 0 }, wallT: { x: 0, z: 0 },
+           regrabTimer: 0, lastWallN: null };
 }
 
 // ground top speed for the current momentum (old units -> metres). This is the PLAIN run speed; b-hop / air speed can exceed it.
@@ -41,6 +45,13 @@ function airAccelerate(s, ax, az, wishSpeed) {
   s.vx += ax * a; s.vz += az * a;
 }
 
+// Is the ground close enough that a jump press now should wait in the buffer for the landing (a b-hop) instead of
+// spending the air jump? True when we are falling and will touch down within JUMP.buffer seconds.
+function landingSoon(ctx, s) {
+  if (s.vy >= 0) return false;
+  return groundGap(ctx, -s.vy * JUMP.buffer) < Infinity;
+}
+
 // One fixed tick. `ctx` is the physics world (movePlayer moves the capsule and reports the result).
 export function stepPlayer(s, inp, ctx) {
   const grounded = ctx.player.grounded;
@@ -61,12 +72,38 @@ export function stepPlayer(s, inp, ctx) {
   // ---- timers
   if (s.dashCd > 0) s.dashCd = Math.max(0, s.dashCd - STEP);
   if (s.dashT > 0) s.dashT = Math.max(0, s.dashT - STEP);
+  if (s.regrabTimer > 0) s.regrabTimer = Math.max(0, s.regrabTimer - STEP);
+  if (grounded) s.airJumpsLeft = JUMP.maxAirJumps;
+
+  // ---- wall-run detection: in the air, holding W, fast enough, with a wall beside us that is not the one we just kicked off
+  s.wallRunning = false;
+  const hs = Math.hypot(s.vx, s.vz);
+  if (!grounded && inp.fwd && s.dashT <= 0 && s.airT >= WALLRUN.minAir && hs > m(WALLRUN.minSpeed)) {
+    const w = detectWall(ctx, Math.atan2(s.vx, s.vz));
+    const sameWall = s.regrabTimer > 0 && s.lastWallN && (w.hit && w.normal.x * s.lastWallN.x + w.normal.z * s.lastWallN.z > 0.9);
+    if (w.hit && !sameWall) {
+      let tx = -w.normal.z, tz = w.normal.x;                  // wall tangent, signed to point the way we are travelling
+      if (s.vx * tx + s.vz * tz < 0) { tx = -tx; tz = -tz; }
+      if (Math.abs(s.vx * tx + s.vz * tz) / hs >= WALLRUN.minTangent) {
+        s.wallRunning = true; s.wallSide = w.side; s.wallN = w.normal; s.wallT = { x: tx, z: tz };
+        s.airJumpsLeft = JUMP.maxAirJumps;                    // catching a wall refills the air jump
+      }
+    }
+  }
 
   // ---- jump: buffer (pressed shortly before landing) + coyote time (shortly after leaving a ledge)
   if (inp.jump) s.jumpBuf = JUMP.buffer; else s.jumpBuf = Math.max(0, s.jumpBuf - STEP);
   if (grounded && s.vy <= 0) s.coyote = JUMP.coyote; else s.coyote = Math.max(0, s.coyote - STEP);
-  let jumped = false;
-  if (s.jumpBuf > 0 && s.coyote > 0) {
+  let jumped = false, launched = false, airJumped = false;     // launched: a jump / air jump / kick set vy this tick
+  if (s.jumpBuf > 0 && s.wallRunning) {                        // ---- wall-kick: up, away from the wall, a bit forward
+    const speed = Math.max(hs, m(WALLRUN.holdSpeed)) + m(WALLRUN.kickFwd);
+    s.vy = m(WALLRUN.kickUp);
+    s.vx = s.wallT.x * speed + s.wallN.x * m(WALLRUN.kickOut);
+    s.vz = s.wallT.z * speed + s.wallN.z * m(WALLRUN.kickOut);
+    s.regrabTimer = WALLRUN.regrabCd; s.lastWallN = s.wallN;   // must chain to a DIFFERENT wall
+    s.jumpBuf = 0; s.coyote = 0; s.bhopTimer = 0; s.dashT = 0;
+    s.wallRunning = false; launched = true;
+  } else if (s.jumpBuf > 0 && s.coyote > 0) {
     s.vy = m(JUMP.impulse); s.jumpBuf = 0; s.coyote = 0; jumped = true;
     s.dashT = 0;                                             // jumping out of a dash keeps its speed but frees the steering
     if (s.bhopTimer > 0) {                                   // jumped inside the landing window: b-hop timing bonus
@@ -80,6 +117,17 @@ export function stepPlayer(s, inp, ctx) {
       s.bhopChain++;
     }
     s.bhopTimer = 0;
+    launched = true;
+  } else if (s.jumpBuf > 0 && !grounded && s.coyote <= 0 && s.airJumpsLeft > 0 && !landingSoon(ctx, s)) {
+    // ---- air jump: coyote time is over, so this press spends an air jump. Crisp push toward the held keys, speed never lost.
+    s.vy = m(JUMP.doubleJumpImpulse);
+    s.airJumpsLeft--; s.jumpBuf = 0; s.dashT = 0; launched = true; airJumped = true;
+    if (inp.moving) {
+      const v0 = Math.hypot(s.vx, s.vz);
+      s.vx += inp.ax * m(JUMP.doubleJumpDir); s.vz += inp.az * m(JUMP.doubleJumpDir);
+      const v1 = Math.hypot(s.vx, s.vz);
+      if (v1 < v0 && v1 > 1e-6) { s.vx *= v0 / v1; s.vz *= v0 / v1; }   // a snap-turn redirects, it does not brake
+    }
   }
 
   // ---- dash (F): locks a horizontal direction for DASH.duration at DASH.speed (or the current speed if that is higher)
@@ -92,9 +140,10 @@ export function stepPlayer(s, inp, ctx) {
     s.sliding = false;
   }
   const dashing = s.dashT > 0;
+  if (dashing) s.wallRunning = false;                         // a dash breaks away from the wall
 
   // ---- slide state: Shift held on the ground enters (with a speed boost), releasing / jumping / leaving the ground ends it
-  if (jumped || dashing) s.sliding = false;
+  if (jumped || launched || dashing || s.wallRunning) s.sliding = false;
   else if (s.sliding && (!inp.slide || (!grounded && s.coyote <= 0))) s.sliding = false;
   else if (!s.sliding && inp.slide && grounded) {
     s.sliding = true;
@@ -109,6 +158,10 @@ export function stepPlayer(s, inp, ctx) {
   const sp = runSpeed(s);
   if (dashing) {                                              // locked burst
     s.vx = s.dashX * s.dashSpeed; s.vz = s.dashZ * s.dashSpeed;
+  } else if (s.wallRunning) {                                 // run along the wall: speed kept (min holdSpeed), aimed along the tangent
+    const spd = Math.max(hs, m(WALLRUN.holdSpeed)), pin = m(WALLRUN.stick);
+    s.vx = s.wallT.x * spd - s.wallN.x * pin;
+    s.vz = s.wallT.z * spd - s.wallN.z * pin;
   } else if (s.sliding && grounded) {
     if (s.bhopTimer <= 0) {                                   // (inside the landing window a slide keeps all its speed)
       const f = Math.pow(SLIDE.friction, STEP);               // glide: low friction, momentum kept
@@ -127,12 +180,15 @@ export function stepPlayer(s, inp, ctx) {
       s.vx += (inp.ax * sp - s.vx) * k;
       s.vz += (inp.az * sp - s.vz) * k;
     }
-  } else if (inp.moving) {                                    // air (and the takeoff tick): Quake air-strafe, no drag
-    airAccelerate(s, inp.ax, inp.az, sp);
+  } else if (inp.moving && !airJumped) {                      // air (and the takeoff tick): Quake air-strafe, no drag.
+    airAccelerate(s, inp.ax, inp.az, sp);                     // (the air-jump tick skips it, so the snap-turn keeps its speed)
   }
 
   // ---- vertical: stick to the ground, otherwise gravity (light while dashing, heavier on the way down than up)
-  if (jumped) { /* takeoff tick: move with the full impulse */ }
+  if (launched) { /* takeoff tick: move with the full impulse */ }
+  else if (s.wallRunning) {                                   // light gravity, and the fall speed is clamped
+    s.vy = Math.max(s.vy - m(WALLRUN.wallGrav) * STEP, -m(WALLRUN.maxFall));
+  }
   else if (grounded && s.vy <= 0) s.vy = -0.5;
   else s.vy -= m(dashing ? DASH.airGrav : (s.vy > 0 ? JUMP.gravRise : JUMP.gravFall)) * STEP;
 
