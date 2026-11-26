@@ -3,14 +3,19 @@
 // Done so far: progressive momentum run (runT, plain run capped at RUN.max), jump (buffer, coyote time, rise / fall gravity),
 // Quake-style air-strafing (no air drag, no top speed), b-hop landing window, crouch-slide, dash burst, double jump,
 // wall-run + wall-kick. Coming next: pillar orbit.
+// One state object per player (6 per match). `state.locked` (set by main.js while stunned, in countdown or round / match end)
+// makes stepPlayer ignore the input snapshot, so knockback plays out under normal gravity / friction with no steering.
 // Loads after: config.js, physics/world.js
 // Speeds in `state` are in METRES / s (already scaled); config numbers are in old units and go through m().
 
 import { STEP, m, PUPPET, RUN, MOVE, JUMP, BHOP, DASH, SLIDE, WALLRUN } from '../config.js';
 import { movePlayer, hasHeadroom, detectWall, groundGap } from './world.js';
 
+// Input snapshot with nothing pressed (used while a player is locked).
+export const IDLE_INPUT = Object.freeze({ ax: 0, az: 0, moving: false, fwd: false, jump: false, dash: false, slide: false });
+
 export function createPlayerState() {
-  return { vx: 0, vz: 0, vy: 0, facing: 0, runT: 0, isIt: false, wallHit: false, jumpBuf: 0, coyote: 0,
+  return { vx: 0, vz: 0, vy: 0, facing: 0, runT: 0, isIt: false, locked: false, wallHit: false, jumpBuf: 0, coyote: 0,
            sliding: false, height: m(PUPPET.height),
            wasGrounded: true, airT: 0, bhopTimer: 0, bhopChain: 0,
            dashT: 0, dashCd: 0, dashX: 0, dashZ: 1, dashSpeed: 0,
@@ -54,6 +59,7 @@ function landingSoon(ctx, s) {
 
 // One fixed tick. `ctx` is the physics world (movePlayer moves the capsule and reports the result).
 export function stepPlayer(s, inp, ctx) {
+  if (s.locked) inp = IDLE_INPUT;                             // stunned / frozen: no steering, jumps, dashes or slides (knockback keeps its velocity)
   const grounded = ctx.player.grounded;
   // A landing needs a real stretch in the air. Rapier's grounded flag can drop for a single tick while running on flat
   // ground (the resting push into the floor is smaller than the controller's skin), and that must not open a b-hop window.
