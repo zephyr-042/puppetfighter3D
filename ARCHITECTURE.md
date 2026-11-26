@@ -9,8 +9,8 @@ The old game stays live in its own repo; this is a separate project.
 index.html                 Page shell + match HUD (timer, IT status, IT-time leaderboard, round / match banner), loads src/main.js as a module.
 package.json               Dependencies (three, @dimforge/rapier3d-compat) and vite scripts.
 src/config.js              Every tunable number, in OLD 2.5D units. SCALE converts to metres at the point of use.
-src/game/maps.js           Map data (DISTRICT_MAP: boxes, pillars, holes, ramps, spawns) + shared floorSlabs() / rampSpan() geometry helpers.
-src/input.js                Keyboard state and the per-tick input snapshot (wanted direction, jump edge, dash edge, slide held, grapple held (E / right mouse / left mouse while pointer-locked); grab to follow).
+src/game/maps.js           Map data (DISTRICT_MAP "Glitch" parkour arena: boxes with optional floating y0, pillars, holes, ramps, spawns) + shared boxSpan() / floorSlabs() / rampSpan() helpers + validateMap() (Node-runnable data checks).
+src/input.js                Keyboard state and the per-tick input snapshot (wanted direction, jump edge, dash edge, slide held, grapple held (E / right mouse); grab to follow).
 src/game/state.js          Plain-data match state (players, mode, timers, events). No engine deps. Spawns are passed in METRES.
 src/game/rules.js          Tag rules over that state: tag, dash shove, slide trip, soft separation, IT-time scoring, rounds / match end.
 src/physics/player.js      Movement rules as stepPlayer(state, input, ctx): momentum run, jump, double jump, air-strafe, b-hop, crouch-slide, dash, wall-run, wall-kick, grapple / sticky hand; `state.locked` ignores input (stun / freeze); pillar orbit to follow.
@@ -63,7 +63,7 @@ src/main.js                Boot, 6-player match (1 human + 5 bots, botInput), th
 | Speed FOV warp | done |
 | Double jump | done |
 | Wall-run + wall-kick (+ camera roll) | done |
-| Grapple / sticky hand (hold E, right mouse, or left mouse while pointer-locked) | done (see Step 2.6 notes) |
+| Grapple / sticky hand (hold E or right mouse) | done (see Step 2.6 notes) |
 | Orbital pillar grab | |
 | Squash + tether visuals | |
 
@@ -120,8 +120,8 @@ src/main.js                Boot, 6-player match (1 human + 5 bots, botInput), th
   chain count is left alone, and normal air-strafing continues from the next tick.
 - **Camera roll:** `updateCamera(..., wallSide)` eases `rig.roll` to `wallSide * camTilt` and applies it with `camera.rotateZ` after `lookAt`
   (leans away from the wall). HUD shows `AIRJ n`, `WALLRUN`, and `regrab` seconds.
-- **Wall height:** the wall ray sits `torso` (36) above the feet, so a wall must be taller than the jump arc to be run along. The 175-high
-  The north / south gauntlets (`DISTRICT_MAP`, see Step 3 notes) are the main wall-run spots: 24-thick, 220-tall panels in two rows 320 apart.
+- **Wall height:** the wall ray sits `torso` (36) above the feet, so a wall must be taller than the jump arc to be run along. The 230-high
+  cyan gauntlet panels (north / south) and the orange billboards over the pit are the main wall-run spots.
 - **Speed FOV (`CAM.fovWarp*`):** `updateCamera(..., speed)` eases the FOV up to +15 degrees between 300 and 750 units / s.
 - **HUD:** `spd`, `runT`, `BHOP` (chain count, `(window)` while open), `DASH` (ready / GO / cooldown seconds), `SLIDE`.
 - **Visuals:** `state.height` drives the mesh squash (`setPuppetHeight`) and the camera pivot (scaled by height / standing
@@ -129,7 +129,7 @@ src/main.js                Boot, 6-player match (1 human + 5 bots, botInput), th
 
 ## Step 2.6 notes (grapple / sticky hand)
 
-- **Input:** hold `E`, the right mouse button, or the LEFT mouse button while the pointer is locked (`input.js`; `contextmenu` blocked on the canvas) -> `input.grapple`. The left click that LOCKS the pointer does not fire (the lock is not on yet when `mousedown` arrives); Esc / blur / `pointerlockchange` release it. `stepPlayer` fires on the press edge (`grapplePrev`).
+- **Input:** hold `E` or the right mouse button (`input.js`, `contextmenu` blocked on the canvas) -> `input.grapple`. `stepPlayer` fires on the press edge (`grapplePrev`).
 - **Config:** `GRAPPLE` in `config.js` (maxRange 1120 = 28 m, playerRange 640 = 16 m, pullAccel 1450, maxPullSpeed 780, detachJumpBoost 180, cooldown 1.6, maxDuration 2.2,
   plus missCooldown 0.3, gravity 450, detachDist 72 = 1.8 m, hitStun 0.4, hitShove 220, aimPad 20, torso 0.6).
 - **Shot (`raycastGrapple` in world.js):** a ray from the CAMERA eye along the camera look direction (`aimFromCamera` in main.js, so it goes through the crosshair). Static geometry is tested with a real Rapier ray
@@ -148,31 +148,18 @@ src/main.js                Boot, 6-player match (1 human + 5 bots, botInput), th
 
 ## Step 3 progress (maps)
 
-**District = "Grapple Cathedral"** (`game/maps.js`, `rect` hw 2200 x hd 1500 = 4400 x 3000 units, lip 14). The whole map is 180-degree rotation symmetric (`twin()`: x, z negated, ramp `dir` flipped),
-so every lane / spawn is equal. Same exports as before (`DISTRICT_MAP`, `floorSlabs`, `rampSpan`), so world.js and scene.js did not change. Boxes still have their base at y = 0.
-- **Wall-run gauntlets (north z = -1330 / -1010, south = twin):** 7 panels per lane, `length` 650-900, `thickness` 24, `height` 220, rows 320 apart (faces 296 apart, inside the 280-340 brief), each panel overlapping
-  the next one's start by 150-350, alternating rows west -> east. Chain: wall-run, wall-kick across, opposite wall-run, ... then slide-hop off the end. Colours: green row A, orange row B.
-- **Cathedral (centre):** one 760 x 500 skylight pit (the only hole). Two skybridges, height 140 and width 110: east-west (x +-560, lands on the two 140 decks) and north-south (z +-400, fed by a 110-wide 17-degree
-  ramp at each end). Four grapple towers (45 half-size) at (+-470, +-400): heights 340 (NW, SE) and 380 (NE, SW). Falling into the pit = a fall (respawn + you are IT).
-- **East / West:** deck 140 at x +-560..920 (the bridge end) with a 17-degree wide ramp (400) down to the plain (downhill crouch-slide run) and 17-degree ramps from the north and south ground. 70-high decks at
-  (+-1500, +-520) with 15-degree ramps on the west and east sides. A 40-high kicker ramp (16 degrees, x 1480..1620) sits where the downhill run ends, to launch into a b-hop / air-strafe chain.
-- **Pillars (r 30, h 260):** NE / SW and NW / SE corner turns at (+-2020, -+1150) and one on each plain at (+-1850, -+170).
-- **Spawns:** 6, all y = 0, checked in Node (distance to every box, ramp, hole and pillar edge, and to the roof edge): all >= 245 (>= 200 required): (-1900,-100), (1900,100), (-300,-700), (300,700), (1700,-1000), (-1700,1000).
-- **Checks run:** no piece outside the rect, no overlaps except the two crossing skybridges, all 18 ramps 15-17 degrees, every elevated top has a ramp (or a bridge) onto it, and the open ground is ONE connected region (flood fill at 20 units with the puppet radius
-  added), so there is no enclosed pocket or dead end. Not play-tested yet: gap widths in the gauntlet are by the numbers (kickOut 260, 296 between faces), tune panel spacing if the chain feels too tight.
-
 | Item | Status |
 |------|--------|
-| District ("Grapple Cathedral", 4400 x 3000): floor slabs around 1 central skylight pit (4 slabs), 26 boxes, 6 pillars, 18 ramp wedges | done |
+| District colliders: floor slabs around the central pit, 42 boxes (16 floating), 4 pillars, 6 ramp wedges | map data done; `y0` consumer patch in world.js pending (see Step 3.1) |
 | District meshes: slabs (world-aligned grid), rim trims, boxes, pillars, ramps (the old building shaft + skyline are gone, see Rendering budget) | done |
 | Spawn at `DISTRICT_MAP.spawns`, fall below -12 m (ragdoll + respawn, see Step 4-5 wiring), `R` | done |
 | Arena, Large, Roof, Complex maps | |
 
-- **Shared geometry (`game/maps.js`):** `floorSlabs(map)` cuts the roof rect into non-overlapping slabs around the holes (4 slabs for District; slabs +
+- **Shared geometry (`game/maps.js`):** `floorSlabs(map)` cuts the roof rect into non-overlapping slabs around the holes (12 slabs for District; slabs +
   holes = the rect exactly). `rampSpan(ramp)` gives the low / high edge, width and rotation of a ramp. world.js and scene.js both build from these.
 - **Colliders (world.js):** every static piece is in `WALL_GROUP` (floor slabs, boxes, cylinders for pillars, ramps), so `detectWall`, `groundGap` and the
   camera boom all see the same geometry. A skylight hole is simply no collider there, so the player falls through.
-- **Ramps are solid wedges** (a convex hull of the edge profile), not tilted slabs: nothing hollow under them to slide into. District slopes: 15 / 16 / 17 degrees.
+- **Ramps are solid wedges** (a convex hull of the edge profile), not tilted slabs: nothing hollow under them to slide into. Slopes in the current District: 16.0 (speed ramps) and 12.9 (deck ramps) degrees.
   A near-horizontal wall ray never counts a ramp surface as a wall (the normal filter rejects slopes under 30 degrees from horizontal).
 - **Slope handling in player.js (needed once ramps existed):**
   1. The "blocked" velocity clamp is skipped when the controller climbed on its own (`vy <= 0` but `c.y > 0`): on a slope the controller turns part of the
@@ -183,10 +170,60 @@ so every lane / spawn is equal. Same exports as before (`DISTRICT_MAP`, `floorSl
 - **Falling:** `hasFallen(ctx)` = feet below `MAP.fallY` (-480 units = -12 m). `main.js` then treats it as a fall (ragdoll tumbles into the void, the player reappears on their spawn after 1.2 s). `R` triggers the same
   fall (it is a "stuck" button, so it is NOT a free escape from IT). `placePlayer` / `teleportPlayer`
   restore the standing capsule (a slide shrinks it) and `main.js` resets all movement state (`createPlayerState`).
-- **Spawn selection:** `MAP.spawn` (default 0) or `?spawn=N` in the page URL (0-5), e.g. `?spawn=2` drops YOU north of the cathedral (the spawn list is rotated so the bots take the other five). Faces the middle of the roof.
+- **Spawn selection:** `MAP.spawn` (default 0) or `?spawn=N` in the page URL (0-5), e.g. `?spawn=2` drops YOU on the SE pocket (the spawn list is rotated so the bots take the other five). Faces the middle of the roof (the pit).
 - **Rendering notes:** floor slabs share one grid texture with world-aligned offsets (5 m tiles) so lines run straight across slab seams; rim trims are visual
-  only (a 14-unit coping strip on the roof edge and around each hole); there is no geometry outside the roof (skylights look into the sky gradient + fog);
+  only (a 14-unit coping strip on the roof edge and around each hole); there is no geometry outside the roof (the pit looks into the sky gradient + fog);
   the sun and its 1024 shadow map follow the focus point (`setFocus`: your capsule, or your ragdoll torso while you tumble).
+
+## Step 3.1: elevated floating boxes (`y0`) + "Glitch" District redesign
+
+**Box contract.** `boxes` entries are `{ x, z, hw, hd, h, c, y0? }`. `h` is the TOP height and `y0` the BOTTOM height, both in old units, `y0` default 0.
+`boxSpan(b)` (maps.js) returns `{ y0, top, cy, height }` with `cy = (y0 + h) / 2` and `height = h - y0`. world.js and scene.js must both use it:
+the Rapier cuboid half-height is `m(height) / 2` and the collider / mesh centre is `y = m(cy)`; the mesh `BoxGeometry` height is `m(height)`.
+A box with `y0 = 0` is byte-identical to the old behaviour. Colours stay `[r, g, b]` (0..255); maps.js has a `hex(0xRRGGBB)` helper so the palette reads as web colours.
+
+**Consumer patch (world.js / scene.js).** Those two files were NOT part of the source snapshot this change was made from, so they are specified here instead of rewritten.
+Everywhere either file builds a box from `b.h`, change the vertical numbers only:
+
+```js
+import { boxSpan } from '../game/maps.js';           // scene.js: '../game/maps.js' as well
+const s = boxSpan(b);
+// world.js: RAPIER.ColliderDesc.cuboid(m(b.hw), m(s.height) / 2, m(b.hd)).setTranslation(m(b.x), m(s.cy), m(b.z))
+// scene.js: new THREE.BoxGeometry(m(b.hw * 2), m(s.height), m(b.hd * 2));  mesh.position.set(m(b.x), m(s.cy), m(b.z));
+```
+
+(Old code was `cuboid(.., m(b.h) / 2, ..)` at `y = m(b.h / 2)`.) Ramps: `rampSpan(r)` now also returns `base` (wedge underside, default 0); build the hull
+profile as `(0, base) (len, base) (len, y1) (0, y0)`, i.e. replace the hard-coded 0 underside with `span.base`. No District ramp sets `base`, so nothing changes today.
+Shadows / rim trims are unchanged. Floating boxes are normal `WALL_GROUP` colliders, so `detectWall`, `groundGap`, the camera boom and `raycastGrapple` see them with no further change.
+
+**`floorSlabs(map)` / `rampSpan(r)` seam guarantees.** Holes are clamped to the rect; every slab also carries exact edges `x0 / x1 / z0 / z1`, and neighbouring slabs share the same numbers
+(build the collider from `hw / hd` or from the edges, both exact for integer maps). slabs + holes tile the rect exactly (checked by `validateMap`). Ramps always rise from `base`
+(0 = floor), so there is no air gap under a wedge, and the high edge of a ramp that meets a deck face touches it exactly.
+
+**DISTRICT_MAP "Glitch" layout** (rect `hw 1600, hd 1200` = 3200 x 2400, point-symmetric under `(x, z) -> (-x, -z)`, built with `addBoxSym` etc.):
+
+| Zone | Pieces |
+|------|--------|
+| Centre | skylight pit `hw 420, hd 260`; two floating skybridges (`y0 110, h 130`, 120 wide, ends touch the decks at x = +-480); two floating orange `0xe67e22` billboards (`y0 150, h 330`, 20 thick) above them |
+| North / South | 9 cyan `0x3498db` wall-run panels per side (`h 230`, 20 thick), rows 230 / 250 apart face to face, staggered so each panel ends where the opposite row's next one starts; exit onto an h115 launch pad and a 16.0 degree gold `0xf1c40f` downhill speed ramp (400 long, 300 wide) |
+| East / West | h110 decks, wide double ramps `0 -> 110`, h260 cover blocks on the deck (`y0 110`), two floating ledges per deck (`y0 210, h 230`, 100 over the deck: double jump or grapple) |
+| Perimeter | 4 grapple towers (`h 380`) with yellow beacon caps (`y0 380, h 404`), 4 round pillars (`r 34, h 280`) |
+| Spawns | 6, all `y = 0`, in the NE / SW / SE / NW pockets and the north / south rim, each >= 200 clear of every hole / obstacle footprint (min 222) |
+
+Known limits: the gauntlet exit pad is a head-on h115 face for a player wall-running straight at it (wall-kick or jump over it, or take the ramp from below); nothing here has been play-tested for
+speed tuning. Bots still have no pathfinding and do not use the new verticality.
+
+**Verification.** `validateMap(DISTRICT_MAP)` (exported from maps.js, pure data, no engine) checks: exports, shape and everything inside the rect, 3D box / box overlaps that respect `y0..h`,
+ramp / ramp, ramp / box (using the ramp height over the overlap), ramp / pillar, pillar overlaps, nothing standing in a hole (floating boxes may span it), slab + hole tiling, 6 spawns at `y = 0`
+with >= 200 clearance, a ground flood fill (20-unit cells, 20-unit body radius, obstacles that reach below head height `72`, ramps and holes blocked) in which all spawns share one region with 0 sealed pockets,
+and that every ramp's low edge meets that connected ground. Run it under Node (maps.js is an ES module, so copy it to `.mjs` or run with `--input-type=module`):
+
+```sh
+cp src/game/maps.js /tmp/maps.mjs && node -e "import('/tmp/maps.mjs').then(({DISTRICT_MAP:m,validateMap:v})=>{const r=v(m);console.log(r.ok,r.stats,r.errors)})"
+```
+
+Last run: ok, 42 boxes (16 floating), 4 pillars, 6 ramps, 1 hole, 4 floor slabs, min spawn clearance 222, 12184 open ground cells, 0 pockets. Injected faults (box overlapping a skybridge, box in the pit,
+spawn off the floor, wall sealing a lane, overlapping ramp) are all reported.
 
 ## Step 4-5 wiring (tag match, bots, ragdolls, HUD)
 
@@ -211,7 +248,7 @@ World gravity is -24 m/s^2 but only the dynamic ragdoll bodies feel it; capsules
 
 **Bots (`botInput(gs, idx)` in main.js).** No pathfinding. IT bot: chase the nearest runner (leading its velocity slightly), occasional hop, dash when within 5.5 m.
 Runner bot: run straight away from IT with a sine weave, dash within 4.2 m (a dashing runner shoves IT, see rules.js). Both look 0.5 s ahead along their velocity and steer
-away from the roof edge and the skylights, and un-stick themselves (barely moved in 0.5 s -> strafe + hop for 0.7 s).
+away from the roof edge and the pit, and un-stick themselves (barely moved in 0.5 s -> strafe + hop for 0.7 s).
 
 **Ragdoll lifecycle (cosmetic only; the capsule stays the single source of truth):**
 - `stun > 0` and no ragdoll: `spawnRagdoll(RAPIER, world, feet, velocity, knock impulse, { yaw })`, the capsule mesh is hidden, 6 meshes (`RAGDOLL_RIG` sizes, player colour, faceless)
@@ -231,5 +268,5 @@ first = currently winning, IT marker, round wins), refreshed ~7x / s and only wr
 (`roundend`), match winner (`matchend`, press Enter to start a new match via `startMatch`). Small toast line for tag / shove / trip / fall events (`drainEvents`, once per frame).
 Top left keeps the movement tuning line. Match settings (first to 3 round wins, 60 s rounds, 3 s countdown) are the `createGameState` defaults.
 
-**Known limits / next:** bots have no pathfinding (they can get stuck against the gauntlet panels, the stuck logic frees them); the ragdoll is not synced to the capsule while it tumbles;
+**Known limits / next:** bots have no pathfinding (they can get boxed in by the wall-run gauntlets, the stuck logic frees them); the ragdoll is not synced to the capsule while it tumbles;
 no title screen or lobby yet (the match starts straight into the countdown); pillar orbit is still not implemented (wall-run covers curving around pillars).
