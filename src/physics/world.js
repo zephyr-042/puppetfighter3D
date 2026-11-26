@@ -4,7 +4,7 @@
 // Loads after: config.js
 
 import RAPIER from '@dimforge/rapier3d-compat';
-import { SCALE, STEP, m, PUPPET, MOVE, TEST_FLOOR } from '../config.js';
+import { SCALE, STEP, m, PUPPET, MOVE, TEST_FLOOR, TEST_BLOCKS } from '../config.js';
 
 export const WALL_GROUP = 0x0001;    // collision group of static level geometry (the camera ray hits these)
 
@@ -17,6 +17,14 @@ export async function createWorld() {
   const hw = m(TEST_FLOOR.hw), hd = m(TEST_FLOOR.hd), th = m(TEST_FLOOR.thickness) / 2;
   const floorBody = world.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(0, -th, 0));
   world.createCollider(RAPIER.ColliderDesc.cuboid(hw, th, hd), floorBody);
+
+  // ---- static test blocks: one cuboid per TEST_BLOCKS entry, same centre and half-extents as the meshes in render/scene.js
+  // (x, z = centre, hw / hd = half width / depth, h = height; the bottom sits on the floor at y = 0)
+  for (const b of TEST_BLOCKS) {
+    const bh = m(b.h) / 2;
+    const bb = world.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(m(b.x), bh, m(b.z)));
+    world.createCollider(RAPIER.ColliderDesc.cuboid(m(b.hw), bh, m(b.hd)), bb);
+  }
 
   // ---- the puppet: kinematic capsule. cylinder half-height + radius = total height
   const radius = m(PUPPET.radius);
