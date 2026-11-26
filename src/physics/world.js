@@ -1,31 +1,63 @@
 // src/physics/world.js
-// PHYSICS: the Rapier world, the static test floor and the kinematic capsule controller.
+// PHYSICS: the Rapier world, the static map (floor slabs with skylight holes, boxes, pillars, ramps) and the kinematic capsule.
 // Gameplay movement is a kinematic capsule driven by our own velocity; Rapier only resolves collisions.
-// Loads after: config.js
+// Loads after: config.js, game/maps.js
 
 import RAPIER from '@dimforge/rapier3d-compat';
-import { SCALE, STEP, m, PUPPET, MOVE, WALLRUN, TEST_FLOOR, TEST_BLOCKS } from '../config.js';
+import { SCALE, STEP, m, PUPPET, MOVE, WALLRUN, MAP } from '../config.js';
+import DISTRICT_MAP, { floorSlabs, rampSpan } from '../game/maps.js';
 
-export const WALL_GROUP = 0x0001;    // collision group of static level geometry (wall / ground rays only look at this group)
+export const WALL_GROUP = 0x0001;    // collision group of ALL static level geometry (wall / ground / camera rays look at this group)
 const STATIC_GROUPS = (WALL_GROUP << 16) | 0xFFFF;       // member of WALL_GROUP, collides with everything
 const WALL_RAY_GROUPS = (0xFFFF << 16) | WALL_GROUP;     // a ray that only sees WALL_GROUP members
 
-export async function createWorld() {
+// Solid wedge for a ramp: a convex hull of the low / high edge profile. (A solid wedge, not a tilted slab, so there is no
+// hollow space under the ramp to slide into.) Returns a Float32Array of points in metres.
+function rampPoints(r) {
+  const s = rampSpan(r), pts = [];
+  for (const side of [-1, 1]) {
+    const across = s.across + side * s.w;
+    const ends = [[s.lo, 0], [s.hi, 0], [s.hi, s.y1]];
+    if (s.y0 > 0) ends.push([s.lo, s.y0]);                   // a ramp that starts on a ledge has a flat low face; from the floor it is a plain prism
+    for (const [along, y] of ends) {
+      const x = s.alongX ? along : across, z = s.alongX ? across : along;
+      pts.push(m(x), m(y), m(z));
+    }
+  }
+  return new Float32Array(pts);
+}
+
+export async function createWorld(map = DISTRICT_MAP) {
   await RAPIER.init();
   const world = new RAPIER.World({ x: 0, y: 0, z: 0 });   // gravity is applied by our own movement code
   world.timestep = STEP;
 
-  // ---- static test floor: a thick box whose top face sits at y = 0
-  const hw = m(TEST_FLOOR.hw), hd = m(TEST_FLOOR.hd), th = m(TEST_FLOOR.thickness) / 2;
-  const floorBody = world.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(0, -th, 0));
-  world.createCollider(RAPIER.ColliderDesc.cuboid(hw, th, hd).setCollisionGroups(STATIC_GROUPS), floorBody);
+  const fixed = (x, y, z) => world.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(x, y, z));
+  const solid = (desc, body) => world.createCollider(desc.setCollisionGroups(STATIC_GROUPS), body);
 
-  // ---- static test blocks: one cuboid per TEST_BLOCKS entry, same centre and half-extents as the meshes in render/scene.js
-  // (x, z = centre, hw / hd = half width / depth, h = height; the bottom sits on the floor at y = 0)
-  for (const b of TEST_BLOCKS) {
+  // ---- rooftop floor: slabs around the skylight holes (top face at y = 0), so a hole really is empty space
+  const th = m(MAP.floorThickness) / 2;
+  for (const s of floorSlabs(map)) {
+    solid(RAPIER.ColliderDesc.cuboid(m(s.hw), th, m(s.hd)), fixed(m(s.x), -th, m(s.z)));
+  }
+
+  // ---- boxes: base on the floor (y = 0), top at h
+  for (const b of map.boxes) {
     const bh = m(b.h) / 2;
-    const bb = world.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(m(b.x), bh, m(b.z)));
-    world.createCollider(RAPIER.ColliderDesc.cuboid(m(b.hw), bh, m(b.hd)).setCollisionGroups(STATIC_GROUPS), bb);
+    solid(RAPIER.ColliderDesc.cuboid(m(b.hw), bh, m(b.hd)), fixed(m(b.x), bh, m(b.z)));
+  }
+
+  // ---- pillars: static cylinders, base on the floor
+  for (const p of map.pillars) {
+    const ph = m(p.h) / 2;
+    solid(RAPIER.ColliderDesc.cylinder(ph, m(p.r)), fixed(m(p.x), ph, m(p.z)));
+  }
+
+  // ---- ramps: solid wedges, so the character controller can run (and b-hop) up and down them
+  for (const r of map.ramps) {
+    const hull = RAPIER.ColliderDesc.convexHull(rampPoints(r));
+    if (!hull) throw new Error('ramp hull failed at ' + r.x + ',' + r.z);
+    solid(hull, fixed(0, 0, 0));
   }
 
   // ---- the puppet: kinematic capsule. cylinder half-height + radius = total height
@@ -91,11 +123,28 @@ export function feetPos(ctx) {
   return { x: t.x, y: t.y - p.halfCyl - p.radius, z: t.z };
 }
 
+// Put the standing puppet on a spawn point (old units, y = feet height). Also restores the full standing capsule, in case the
+// player was sliding. Steps the world once so the query structures see the new position before the next move.
+export function teleportPlayer(ctx, x, y, z) {
+  const p = ctx.player, full = m(PUPPET.height), hc = (full - 2 * p.radius) / 2;
+  p.collider.setHalfHeight(hc); p.halfCyl = hc; p.height = full;
+  const pos = { x: m(x), y: m(y) + hc + p.radius + 0.01, z: m(z) };
+  p.body.setTranslation(pos, true);
+  p.body.setNextKinematicTranslation(pos);
+  p.grounded = false;
+  ctx.world.step();
+}
+
+// Fell off the roof or through a skylight: the feet are below MAP.fallY.
+export function hasFallen(ctx) {
+  return feetPos(ctx).y < m(MAP.fallY);
+}
+
 // Cast a ray against static level geometry only (never the puppet itself). Returns distance or null.
 export function raycastStatic(ctx, ox, oy, oz, dx, dy, dz, maxDist) {
   const { RAPIER, world, player } = ctx;
   const ray = new RAPIER.Ray({ x: ox, y: oy, z: oz }, { x: dx, y: dy, z: dz });
-  const hit = world.castRay(ray, maxDist, true, undefined, undefined, player.collider);
+  const hit = world.castRay(ray, maxDist, true, undefined, WALL_RAY_GROUPS, player.collider);
   return hit ? hit.timeOfImpact : null;
 }
 
