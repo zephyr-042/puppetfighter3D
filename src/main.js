@@ -37,9 +37,13 @@ async function boot() {
     const feet = feetPos(ctx);
     view.puppet.position.set(feet.x, feet.y, feet.z);
     view.puppet.rotation.y = state.facing;
-    if (hud) hud.textContent = 'speed ' + Math.round(Math.hypot(state.vx, state.vz) / SCALE) + '  runT ' + state.runT.toFixed(2) + ' / ' + RUN.rampT + '  vy ' + Math.round(state.vy / SCALE) + (state.sliding ? '  SLIDE' : '');
+    const hSpeed = Math.hypot(state.vx, state.vz);
+    if (hud) hud.textContent = 'spd ' + Math.round(hSpeed / SCALE) + '  runT ' + state.runT.toFixed(2) + ' / ' + RUN.rampT +
+      '  BHOP ' + (state.bhopChain > 0 ? 'x' + state.bhopChain : '-') + (state.bhopTimer > 0 ? ' (window)' : '') +
+      '  DASH ' + (state.dashT > 0 ? 'GO' : state.dashCd > 0 ? state.dashCd.toFixed(1) + 's' : 'ready') +
+      (state.sliding ? '  SLIDE' : '');
     view.setPuppetHeight(state.height);
-    updateCamera(rig, view.camera, ctx, feet, dt, m(CAM.pivot) * state.height / m(PUPPET.height));
+    updateCamera(rig, view.camera, ctx, feet, dt, m(CAM.pivot) * state.height / m(PUPPET.height), hSpeed);
     view.renderer.render(view.scene, view.camera);
     requestAnimationFrame(frame);
   }
