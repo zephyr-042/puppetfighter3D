@@ -10,15 +10,15 @@ index.html                 Page shell + match HUD (timer, IT status, IT-time lea
 package.json               Dependencies (three, @dimforge/rapier3d-compat) and vite scripts.
 src/config.js              Every tunable number, in OLD 2.5D units. SCALE converts to metres at the point of use.
 src/game/maps.js           Map data (DISTRICT_MAP: boxes, pillars, holes, ramps, spawns) + shared floorSlabs() / rampSpan() geometry helpers.
-src/input.js                Keyboard state and the per-tick input snapshot (wanted direction, jump edge, dash edge, slide held; grab to follow).
+src/input.js                Keyboard state and the per-tick input snapshot (wanted direction, jump edge, dash edge, slide held, grapple held (E / right mouse); grab to follow).
 src/game/state.js          Plain-data match state (players, mode, timers, events). No engine deps. Spawns are passed in METRES.
 src/game/rules.js          Tag rules over that state: tag, dash shove, slide trip, soft separation, IT-time scoring, rounds / match end.
-src/physics/player.js      Movement rules as stepPlayer(state, input, ctx): momentum run, jump, double jump, air-strafe, b-hop, crouch-slide, dash, wall-run, wall-kick; `state.locked` ignores input (stun / freeze); pillar orbit to follow.
+src/physics/player.js      Movement rules as stepPlayer(state, input, ctx): momentum run, jump, double jump, air-strafe, b-hop, crouch-slide, dash, wall-run, wall-kick, grapple / sticky hand; `state.locked` ignores input (stun / freeze); pillar orbit to follow.
 src/physics/ragdoll.js     On-demand cosmetic 6-part Rapier ragdoll (spawnRagdoll / syncRagdollMeshes / despawnRagdoll), RAGDOLL_RIG dimensions, collision groups.
-src/physics/world.js       Rapier world built from the map (floor slabs, boxes, pillars, ramp wedges, all in WALL_GROUP), one kinematic capsule per player (PLAYER_GROUP) with a shared character controller, rays, detectWall, groundGap, placePlayer / teleportPlayer, nudgePlayer, hasFallen.
-src/render/scene.js        Three.js renderer, lights, the District meshes (slabs + rim trims, boxes, pillars, ramps), no background geometry, per-player puppets (faceless capsule + hidden 6-part ragdoll meshes), the red IT cone (setItMarker), setFocus moves the sun.
+src/physics/world.js       Rapier world built from the map (floor slabs, boxes, pillars, ramp wedges, all in WALL_GROUP), one kinematic capsule per player (PLAYER_GROUP) with a shared character controller, rays, detectWall, groundGap, placePlayer / teleportPlayer, nudgePlayer, hasFallen, raycastGrapple (level + player shots).
+src/render/scene.js        Three.js renderer, lights, the District meshes (slabs + rim trims, boxes, pillars, ramps), no background geometry, per-player puppets (faceless capsule + hidden 6-part ragdoll meshes), the red IT cone (setItMarker), setFocus moves the sun, setGrapple draws the grapple tether.
 src/render/camera.js       Mouse-orbit chase camera (PointerLock) with a Rapier raycast boom.
-src/main.js                Boot, 6-player match (1 human + 5 bots, botInput), the glue between player.js / world.js / rules.js, ragdoll on stun / fall, match HUD, fixed 60 Hz tick decoupled from the render loop. Loads LAST.
+src/main.js                Boot, 6-player match (1 human + 5 bots, botInput), the glue between player.js / world.js / rules.js, ragdoll on stun / fall, grapple aim + snag stun, crosshair / grapple HUD, fixed 60 Hz tick decoupled from the render loop. Loads LAST.
 ```
 
 ## Rules
@@ -63,6 +63,7 @@ src/main.js                Boot, 6-player match (1 human + 5 bots, botInput), th
 | Speed FOV warp | done |
 | Double jump | done |
 | Wall-run + wall-kick (+ camera roll) | done |
+| Grapple / sticky hand (hold E or right mouse) | done (see Step 2.6 notes) |
 | Orbital pillar grab | |
 | Squash + tether visuals | |
 
@@ -125,6 +126,25 @@ src/main.js                Boot, 6-player match (1 human + 5 bots, botInput), th
 - **HUD:** `spd`, `runT`, `BHOP` (chain count, `(window)` while open), `DASH` (ready / GO / cooldown seconds), `SLIDE`.
 - **Visuals:** `state.height` drives the mesh squash (`setPuppetHeight`) and the camera pivot (scaled by height / standing
   height), so the view drops smoothly with the body.
+
+## Step 2.6 notes (grapple / sticky hand)
+
+- **Input:** hold `E` or the right mouse button (`input.js`, `contextmenu` blocked on the canvas) -> `input.grapple`. `stepPlayer` fires on the press edge (`grapplePrev`).
+- **Config:** `GRAPPLE` in `config.js` (maxRange 1120 = 28 m, playerRange 640 = 16 m, pullAccel 1450, maxPullSpeed 780, detachJumpBoost 180, cooldown 1.6, maxDuration 2.2,
+  plus missCooldown 0.3, gravity 450, detachDist 72 = 1.8 m, hitStun 0.4, hitShove 220, aimPad 20, torso 0.6).
+- **Shot (`raycastGrapple` in world.js):** a ray from the CAMERA eye along the camera look direction (`aimFromCamera` in main.js, so it goes through the crosshair). Static geometry is tested with a real Rapier ray
+  (`WALL_GROUP`); every other capsule (never the owner, never a downed player) is tested analytically as a vertical segment with radius + `aimPad` (aim assist), limited to `playerRange`.
+  The closest hit wins, so a wall in front of a player blocks the shot. Every capsule view now carries `all` (all capsule views) for this. A miss only costs `missCooldown`.
+- **Hooked (`stepPlayer`, `grappleActive`):** each tick `pullAccel * dt` is added toward the anchor (measured from the torso), then ONLY the speed toward the anchor is capped at `maxPullSpeed`. Sideways speed is
+  untouched, so aiming off-centre bends the path into a swing arc. Gravity is `GRAPPLE.gravity`, wall-run and slide are off, air-strafe still steers, the air jump is refilled every tick.
+  On a player target `main.js` moves the anchor to their torso (`y + 0.9`) every tick; a downed target or a non-`play` mode releases the hook.
+- **Release:** `input.grapple` let go, `maxDuration`, torso within `detachDist` of the anchor, a dash press, or Space. Space gives `vy = max(vy, detachJumpBoost)` and the press is consumed, so
+  it neither air-jumps nor wall-kicks; the next tick is a normal air-strafe / wall-run tick. Every release starts `cooldown` (`endGrapple`). A locked (stunned / countdown) player releases at once.
+- **Player snag:** reaching a player sets `grappleHit`; `main.js` (after `stepGameRules`) gives that player `stun = hitStun`, a horizontal shove away from the grappler (`max(hitShove, 0.6 * grappler speed)`) and ends their own hook.
+  It works the same for IT (tag set-up) and runners (sabotage / escape). state.js / rules.js are untouched: it only writes the existing `stun`, `vx`, `vz` fields, which the existing knock / ragdoll code already reads.
+- **Visuals / HUD:** `view.setGrapple(i, torso, anchor)` draws a thin glowing cylinder + hook ball per hooked player. The crosshair dot and the status line under it ("GRAPPLE READY" / cooldown seconds / "HOOKED")
+  are created from `main.js` (`makeCrosshair`), so `index.html` did not change. The yellow tuning line also shows `GRAPPLE ready / GO / cooldown`.
+- **Not done:** bots never grapple (no `aim`), and the tether is cosmetic (no rope collision).
 
 ## Step 3 progress (maps)
 

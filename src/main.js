@@ -1,6 +1,6 @@
 // src/main.js
 // MAIN: boots the world + scene, runs the 6-player tag match (1 human + 5 bots), the fixed 60 Hz step decoupled from rendering,
-// the on-demand cosmetic ragdolls and the match HUD. Loads LAST.
+// the on-demand cosmetic ragdolls, the grapple aim / snag glue and the match HUD (plus a JS-built crosshair). Loads LAST.
 // Movement rules live in physics/player.js, tag rules in game/rules.js, keyboard in input.js; this file is the wiring.
 //
 // One tick (STEP = 1/60):
@@ -11,12 +11,13 @@
 //   5. game state -> capsules: knock velocities, separation nudges, ragdoll spawn / despawn, round reset
 // Loads after: everything
 
-import { STEP, MAX_STEPS_PER_FRAME, SCALE, RUN, CAM, PUPPET, MAP, m } from './config.js';
+import * as THREE from 'three';
+import { STEP, MAX_STEPS_PER_FRAME, SCALE, RUN, CAM, PUPPET, MAP, GRAPPLE, m } from './config.js';
 import DISTRICT_MAP from './game/maps.js';
 import { createGameState, addPlayer, resetRoundPlayers, startMatch, drainEvents } from './game/state.js';
 import { stepGameRules } from './game/rules.js';
 import { createWorld, addPlayerCapsule, stepWorld, feetPos, placePlayer, nudgePlayer, hasFallen } from './physics/world.js';
-import { createPlayerState, stepPlayer, IDLE_INPUT } from './physics/player.js';
+import { createPlayerState, stepPlayer, IDLE_INPUT, endGrapple, torsoPos } from './physics/player.js';
 import { spawnRagdoll, syncRagdollMeshes, despawnRagdoll } from './physics/ragdoll.js';
 import { readInput } from './input.js';
 import { createScene } from './render/scene.js';
@@ -27,10 +28,26 @@ const FALL_DOWN = 1.2;              // s a player who fell stays "down" (ragdoll
 const LIMBO_Y = -1000;              // rules see a downed player this far below the map, so nobody can tag / bump the empty spawn
 const $ = (id) => document.getElementById(id);
 
+// Centre-screen aim dot + a small grapple status line under it (built here so index.html needs no change).
+function makeCrosshair() {
+  const dot = document.createElement('div');
+  dot.id = 'crosshair';
+  dot.style.cssText = 'position:fixed;left:50%;top:50%;width:6px;height:6px;margin:-3px 0 0 -3px;border-radius:50%;background:#fff;' +
+    'box-shadow:0 0 0 1px rgba(0,0,0,.75),0 0 6px rgba(255,255,255,.6);pointer-events:none;z-index:5';
+  const tag = document.createElement('div');
+  tag.id = 'grappleStatus';
+  tag.style.cssText = 'position:fixed;left:50%;top:50%;margin-top:14px;transform:translateX(-50%);font:600 11px monospace;letter-spacing:1px;' +
+    'color:#9fe8ff;text-shadow:0 0 3px #000;pointer-events:none;z-index:5;white-space:nowrap';
+  document.body.appendChild(dot); document.body.appendChild(tag);
+  return { dot, tag };
+}
+
 async function boot() {
   const ctx = await createWorld();
   const view = createScene();
   const rig = createCameraRig(view.renderer.domElement);
+  const xhair = makeCrosshair();
+  let xhairText = '';
 
   // ---- spawns: DISTRICT_MAP.spawns are old units, game state is metres. ?spawn=N gives the HUMAN spawn N (rotates the list).
   const raw = DISTRICT_MAP.spawns;
@@ -175,6 +192,14 @@ async function boot() {
     return inp;
   }
 
+  // ---- grapple aim: from the camera eye along the camera look direction (the crosshair). Downed players cannot be hooked.
+  const _eye = new THREE.Vector3(), _look = new THREE.Vector3();
+  function aimFromCamera() {
+    view.camera.getWorldPosition(_eye); view.camera.getWorldDirection(_look);
+    return { origin: { x: _eye.x, y: _eye.y, z: _eye.z }, dir: { x: _look.x, y: _look.y, z: _look.z },
+             owner: 0, skip: (k) => limbo[k] > 0 || gs.players[k].y < -50 };
+  }
+
   // ---- one fixed simulation tick --------------------------------------------------------------------------------------------
   function tick() {
     if (wantRestart) {                                    // Enter after the match: new match, scores to 0
@@ -188,7 +213,14 @@ async function boot() {
       if (limbo[i] > 0) { limbo[i] -= STEP; if (limbo[i] <= 0) { limbo[i] = 0; killRagdoll(i); } }
       s.isIt = p.isIt;
       s.locked = gs.mode !== 'play' || p.stun > 0 || limbo[i] > 0;      // stunned: skip input so the knockback plays out
-      const snap = i === 0 ? readInput(forwardOf(rig)) : (s.locked ? IDLE_INPUT : botInput(gs, i));   // (the human's latches must drain every tick)
+      if (s.grappleActive && s.grappleTarget >= 0) {       // hooked onto a player: the anchor follows their torso
+        const q = gs.players[s.grappleTarget];
+        if (gs.mode !== 'play' || limbo[s.grappleTarget] > 0) endGrapple(s);
+        else { s.grappleAnchor.x = q.x; s.grappleAnchor.y = q.y + 0.9; s.grappleAnchor.z = q.z; }
+      }
+      let snap;
+      if (i === 0) { snap = readInput(forwardOf(rig)); if (snap.grapple) snap.aim = aimFromCamera(); }
+      else snap = s.locked ? IDLE_INPUT : botInput(gs, i);   // (the human's latches must drain every tick)
       stepPlayer(s, snap, views[i]);
     }
 
@@ -231,6 +263,18 @@ async function boot() {
       lastRound = gs.round;
       placeAll();
       return;
+    }
+    for (let i = 0; i < N; i++) {                          // a grapple reached another player: shove + brief stun
+      const gh = states[i].grappleHit;
+      if (gh < 0) continue;
+      states[i].grappleHit = -1;
+      const q = gs.players[gh], me = gs.players[i];
+      if (gs.mode !== 'play' || limbo[gh] > 0 || q.stun > 0) continue;
+      const dx = q.x - me.x, dz = q.z - me.z, l = Math.hypot(dx, dz) || 1;
+      const sp = Math.max(m(GRAPPLE.hitShove), Math.hypot(states[i].vx, states[i].vz) * 0.6);
+      q.stun = GRAPPLE.hitStun; q.vx = dx / l * sp; q.vz = dz / l * sp;    // vx / vz change is adopted into the capsule below
+      endGrapple(states[gh]); states[gh].vy = Math.max(states[gh].vy, 2);
+      el.toast.textContent = pname(i) + ' snagged ' + pname(gh); toastT = 1.6;
     }
     for (let i = 0; i < N; i++) {
       if (limbo[i] > 0) continue;
@@ -328,6 +372,13 @@ async function boot() {
       }
     }
 
+    // grapple tethers: torso -> anchor while hooked
+    for (let i = 0; i < N; i++) {
+      const gs_ = states[i];
+      if (gs_.grappleActive) view.setGrapple(i, torsoPos(views[i], gs_), gs_.grappleAnchor);
+      else view.setGrapple(i, null);
+    }
+
     // the red cone over whoever is IT
     const itIdx = gs.players.findIndex((p) => p.isIt);
     if (itIdx < 0) view.setItMarker(null);
@@ -354,9 +405,16 @@ async function boot() {
       '  BHOP ' + (hs.bhopChain > 0 ? 'x' + hs.bhopChain : '-') + (hs.bhopTimer > 0 ? ' (window)' : '') +
       '  DASH ' + (hs.dashT > 0 ? 'GO' : hs.dashCd > 0 ? hs.dashCd.toFixed(1) + 's' : 'ready') +
       '  AIRJ ' + hs.airJumpsLeft +
+      '  GRAPPLE ' + (hs.grappleActive ? 'GO' : hs.grappleCd > 0 ? hs.grappleCd.toFixed(1) + 's' : 'ready') +
       (hs.wallRunning ? '  WALLRUN' : hs.regrabTimer > 0 ? '  regrab ' + hs.regrabTimer.toFixed(2) + 's' : '') +
       (hs.sliding ? '  SLIDE' : '') + (gs.players[0].stun > 0 ? '  STUN' : '');
     updateHud(dt);
+
+    const gtxt = hs.grappleActive ? 'HOOKED' : hs.grappleCd > 0 ? 'GRAPPLE ' + hs.grappleCd.toFixed(1) + 's' : 'GRAPPLE READY';
+    if (gtxt !== xhairText) {
+      xhairText = gtxt; xhair.tag.textContent = gtxt;
+      xhair.dot.style.background = hs.grappleActive ? '#7fe9ff' : hs.grappleCd > 0 ? '#ff6b6b' : '#fff';
+    }
 
     view.renderer.render(view.scene, view.camera);
     requestAnimationFrame(frame);

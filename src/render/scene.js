@@ -1,7 +1,7 @@
 // src/render/scene.js
 // RENDER (1/2): the Three.js renderer, lights, the District map (floor slabs with rim trims, boxes, pillars, ramp wedges),
 // and one puppet per player: a faceless coloured capsule (squashes while sliding) plus a hidden 6-part ragdoll mesh set that
-// matches RAGDOLL_RIG, and the red "IT" cone marker. No background geometry at all (no skyline, facade or street): just the sky gradient.
+// matches RAGDOLL_RIG, the red "IT" cone marker and the glowing grapple tether (setGrapple). No background geometry at all (no skyline, facade or street): just the sky gradient.
 // Meshes are built from the same map data and helpers (game/maps.js) as the physics colliders, so they always match.
 // Loads after: config.js, game/maps.js, physics/ragdoll.js (RAGDOLL_RIG dimensions only)
 
@@ -214,5 +214,30 @@ export function createScene() {
     camera.updateProjectionMatrix();
   });
 
-  return { renderer, scene, camera, addPuppet: (color) => createPuppet(scene, color), setItMarker, setFocus };
+  // ---- grapple tether: one thin glowing cylinder + a hook ball per player, created on first use
+  const ropeGeo = new THREE.CylinderGeometry(0.035, 0.035, 1, 8), hookGeo = new THREE.SphereGeometry(0.13, 10, 8);
+  const ropeMat = new THREE.MeshBasicMaterial({ color: 0x7fe9ff, toneMapped: false });
+  const ropes = [], UP = new THREE.Vector3(0, 1, 0), rdir = new THREE.Vector3();
+  // from / to = {x, y, z} in metres (torso, anchor); pass null to hide this player's rope.
+  function setGrapple(idx, from, to) {
+    let r = ropes[idx];
+    if (!r) {
+      r = ropes[idx] = { line: new THREE.Mesh(ropeGeo, ropeMat), hook: new THREE.Mesh(hookGeo, ropeMat) };
+      r.line.visible = r.hook.visible = false;
+      r.line.frustumCulled = false;
+      scene.add(r.line); scene.add(r.hook);
+    }
+    if (!from || !to) { r.line.visible = r.hook.visible = false; return; }
+    rdir.set(to.x - from.x, to.y - from.y, to.z - from.z);
+    const len = rdir.length();
+    if (len < 1e-4) { r.line.visible = r.hook.visible = false; return; }
+    rdir.divideScalar(len);
+    r.line.position.set((from.x + to.x) / 2, (from.y + to.y) / 2, (from.z + to.z) / 2);
+    r.line.quaternion.setFromUnitVectors(UP, rdir);
+    r.line.scale.set(1, len, 1);
+    r.hook.position.set(to.x, to.y, to.z);
+    r.line.visible = r.hook.visible = true;
+  }
+
+  return { renderer, scene, camera, addPuppet: (color) => createPuppet(scene, color), setItMarker, setFocus, setGrapple };
 }

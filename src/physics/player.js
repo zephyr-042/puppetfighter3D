@@ -2,17 +2,17 @@
 // PHYSICS: the player's movement rules as a function of (state, input). Ported verb by verb from the old physics.js.
 // Done so far: progressive momentum run (runT, plain run capped at RUN.max), jump (buffer, coyote time, rise / fall gravity),
 // Quake-style air-strafing (no air drag, no top speed), b-hop landing window, crouch-slide, dash burst, double jump,
-// wall-run + wall-kick. Coming next: pillar orbit.
+// wall-run + wall-kick, grapple / sticky hand (hold E / right mouse). Coming next: pillar orbit.
 // One state object per player (6 per match). `state.locked` (set by main.js while stunned, in countdown or round / match end)
 // makes stepPlayer ignore the input snapshot, so knockback plays out under normal gravity / friction with no steering.
 // Loads after: config.js, physics/world.js
 // Speeds in `state` are in METRES / s (already scaled); config numbers are in old units and go through m().
 
-import { STEP, m, PUPPET, RUN, MOVE, JUMP, BHOP, DASH, SLIDE, WALLRUN } from '../config.js';
-import { movePlayer, hasHeadroom, detectWall, groundGap } from './world.js';
+import { STEP, m, PUPPET, RUN, MOVE, JUMP, BHOP, DASH, SLIDE, WALLRUN, GRAPPLE } from '../config.js';
+import { movePlayer, hasHeadroom, detectWall, groundGap, raycastGrapple, feetPos } from './world.js';
 
 // Input snapshot with nothing pressed (used while a player is locked).
-export const IDLE_INPUT = Object.freeze({ ax: 0, az: 0, moving: false, fwd: false, jump: false, dash: false, slide: false });
+export const IDLE_INPUT = Object.freeze({ ax: 0, az: 0, moving: false, fwd: false, jump: false, dash: false, slide: false, grapple: false });
 
 export function createPlayerState() {
   return { vx: 0, vz: 0, vy: 0, facing: 0, runT: 0, isIt: false, locked: false, wallHit: false, jumpBuf: 0, coyote: 0,
@@ -21,7 +21,20 @@ export function createPlayerState() {
            dashT: 0, dashCd: 0, dashX: 0, dashZ: 1, dashSpeed: 0,
            airJumpsLeft: JUMP.maxAirJumps, climbing: false,
            wallRunning: false, wallSide: 0, wallN: { x: 0, z: 0 }, wallT: { x: 0, z: 0 },
-           regrabTimer: 0, lastWallN: null };
+           regrabTimer: 0, lastWallN: null,
+           grappleActive: false, grappleAnchor: { x: 0, y: 0, z: 0 }, grappleTarget: -1, grappleT: 0, grappleCd: 0, grapplePrev: false,
+           grappleHit: -1 };   // grappleHit: index of a player the hook just reached (main.js consumes it: shove + stun)
+}
+
+// Torso point (metres) where the grapple rope leaves the body and the pull is measured from.
+export function torsoPos(ctx, s) {
+  const f = feetPos(ctx);
+  return { x: f.x, y: f.y + s.height * GRAPPLE.torso, z: f.z };
+}
+
+// Release the hook and start the cooldown (also used by main.js when the hooked player goes down or the round changes).
+export function endGrapple(s, cd = GRAPPLE.cooldown) {
+  s.grappleActive = false; s.grappleTarget = -1; s.grappleT = 0; s.grappleCd = cd;
 }
 
 // ground top speed for the current momentum (old units -> metres). This is the PLAIN run speed; b-hop / air speed can exceed it.
@@ -81,10 +94,46 @@ export function stepPlayer(s, inp, ctx) {
   if (s.regrabTimer > 0) s.regrabTimer = Math.max(0, s.regrabTimer - STEP);
   if (grounded) s.airJumpsLeft = JUMP.maxAirJumps;
 
+  // ---- grapple / sticky hand: a press (edge) fires a shot along the aim ray (inp.aim, set by main.js for the human); while hooked
+  // the velocity is pulled toward the anchor and only the speed TOWARD it is capped, so sideways speed survives and the
+  // pull bends the path into a swing. Ends on release, timeout, reaching the anchor, Space (upward pop) or a dash.
+  if (s.grappleCd > 0) s.grappleCd = Math.max(0, s.grappleCd - STEP);
+  let grappling = false, grapJump = false;
+  if (!s.grappleActive && inp.grapple && !s.grapplePrev && s.grappleCd <= 0 && s.dashT <= 0 && inp.aim) {
+    const r = raycastGrapple(ctx, inp.aim.origin, inp.aim.dir, m(GRAPPLE.maxRange), inp.aim.owner, inp.aim.skip);
+    if (r.hit) {
+      s.grappleActive = true; s.grappleT = 0; s.grappleTarget = r.targetPlayer;
+      s.grappleAnchor = { x: r.point.x, y: r.point.y, z: r.point.z };
+    } else s.grappleCd = GRAPPLE.missCooldown;
+  }
+  s.grapplePrev = !!inp.grapple;
+  if (s.grappleActive) {
+    s.grappleT += STEP;
+    const gp = torsoPos(ctx, s), a = s.grappleAnchor;
+    const gx = a.x - gp.x, gy = a.y - gp.y, gz = a.z - gp.z, gd = Math.hypot(gx, gy, gz);
+    if (gd < m(GRAPPLE.detachDist)) {                         // reached the anchor (a player: main.js shoves + stuns them)
+      if (s.grappleTarget >= 0) s.grappleHit = s.grappleTarget;
+      endGrapple(s);
+    } else if (!inp.grapple || s.grappleT >= GRAPPLE.maxDuration) endGrapple(s);
+    else if (inp.jump) {                                      // Space: clean release with an upward pop, straight into air-strafe / wall-run
+      endGrapple(s);
+      s.vy = Math.max(s.vy, m(GRAPPLE.detachJumpBoost));
+      grapJump = true;
+    } else if (inp.dash && s.dashCd <= 0) endGrapple(s);      // the dash takes over below
+    else {
+      const nx = gx / gd, ny = gy / gd, nz = gz / gd, acc = m(GRAPPLE.pullAccel) * STEP;
+      s.vx += nx * acc; s.vy += ny * acc; s.vz += nz * acc;
+      const over = s.vx * nx + s.vy * ny + s.vz * nz - m(GRAPPLE.maxPullSpeed);   // speed toward the anchor above the cap
+      if (over > 0) { s.vx -= nx * over; s.vy -= ny * over; s.vz -= nz * over; }
+      s.airJumpsLeft = JUMP.maxAirJumps;                      // hooking refills the air jump
+      grappling = true;
+    }
+  }
+
   // ---- wall-run detection: in the air, holding W, fast enough, with a wall beside us that is not the one we just kicked off
   s.wallRunning = false;
   const hs = Math.hypot(s.vx, s.vz);
-  if (!grounded && inp.fwd && s.dashT <= 0 && s.airT >= WALLRUN.minAir && hs > m(WALLRUN.minSpeed)) {
+  if (!grounded && !grappling && inp.fwd && s.dashT <= 0 && s.airT >= WALLRUN.minAir && hs > m(WALLRUN.minSpeed)) {
     const w = detectWall(ctx, Math.atan2(s.vx, s.vz));
     const sameWall = s.regrabTimer > 0 && s.lastWallN && (w.hit && w.normal.x * s.lastWallN.x + w.normal.z * s.lastWallN.z > 0.9);
     if (w.hit && !sameWall) {
@@ -99,8 +148,9 @@ export function stepPlayer(s, inp, ctx) {
 
   // ---- jump: buffer (pressed shortly before landing) + coyote time (shortly after leaving a ledge)
   if (inp.jump) s.jumpBuf = JUMP.buffer; else s.jumpBuf = Math.max(0, s.jumpBuf - STEP);
+  if (grapJump) s.jumpBuf = 0;                                // that press was spent releasing the hook
   if (grounded && s.vy <= 0) s.coyote = JUMP.coyote; else s.coyote = Math.max(0, s.coyote - STEP);
-  let jumped = false, launched = false, airJumped = false;     // launched: a jump / air jump / kick set vy this tick
+  let jumped = false, launched = grapJump, airJumped = false;     // launched: a jump / air jump / kick set vy this tick
   if (s.jumpBuf > 0 && s.wallRunning) {                        // ---- wall-kick: up, away from the wall, a bit forward
     const speed = Math.max(hs, m(WALLRUN.holdSpeed)) + m(WALLRUN.kickFwd);
     s.vy = m(WALLRUN.kickUp);
@@ -149,7 +199,7 @@ export function stepPlayer(s, inp, ctx) {
   if (dashing) s.wallRunning = false;                         // a dash breaks away from the wall
 
   // ---- slide state: Shift held on the ground enters (with a speed boost), releasing / jumping / leaving the ground ends it
-  if (jumped || launched || dashing || s.wallRunning) s.sliding = false;
+  if (jumped || launched || dashing || s.wallRunning || grappling) s.sliding = false;
   else if (s.sliding && (!inp.slide || (!grounded && s.coyote <= 0))) s.sliding = false;
   else if (!s.sliding && inp.slide && grounded) {
     s.sliding = true;
@@ -168,6 +218,8 @@ export function stepPlayer(s, inp, ctx) {
     const spd = Math.max(hs, m(WALLRUN.holdSpeed)), pin = m(WALLRUN.stick);
     s.vx = s.wallT.x * spd - s.wallN.x * pin;
     s.vz = s.wallT.z * spd - s.wallN.z * pin;
+  } else if (grappling) {                                     // hooked: the pull owns the velocity, light air steering on top
+    if (inp.moving) airAccelerate(s, inp.ax, inp.az, sp);
   } else if (s.sliding && grounded) {
     if (s.bhopTimer <= 0) {                                   // (inside the landing window a slide keeps all its speed)
       const f = Math.pow(SLIDE.friction, STEP);               // glide: low friction, momentum kept
@@ -179,7 +231,7 @@ export function stepPlayer(s, inp, ctx) {
       const v = Math.hypot(s.vx, s.vz);
       if (v > cap) { s.vx *= cap / v; s.vz *= cap / v; }
     }
-  } else if (grounded && !jumped) {
+  } else if (grounded && !jumped && !grapJump) {
     if (s.bhopTimer > 0) { /* landing window: no friction, no run-speed clamp, speed is preserved */ }
     else {                                                    // normal ground: velocity chases the wanted velocity, so speed above
       const k = Math.min(1, STEP * MOVE.accel);               // the run cap bleeds back down smoothly
@@ -195,6 +247,7 @@ export function stepPlayer(s, inp, ctx) {
   else if (s.wallRunning) {                                   // light gravity, and the fall speed is clamped
     s.vy = Math.max(s.vy - m(WALLRUN.wallGrav) * STEP, -m(WALLRUN.maxFall));
   }
+  else if (grappling) s.vy -= m(GRAPPLE.gravity) * STEP;      // hooked: lighter gravity so swings carry
   else if (grounded && s.vy <= 0) s.vy = -0.5;
   else s.vy -= m(dashing ? DASH.airGrav : (s.vy > 0 ? JUMP.gravRise : JUMP.gravFall)) * STEP;
 
@@ -211,7 +264,7 @@ export function stepPlayer(s, inp, ctx) {
   // Skipped right after a climb (pressing down into a slope only makes the controller turn less of the move into height), and
   // the first two airborne ticks after leaving a surface still count as being on it, which is what covers a ramp crest.
   const onSurface = grounded || s.airT < 0.04;
-  const stickDown = (onSurface && !launched && !s.wallRunning && s.vy <= 0 && !s.climbing) ? m(MOVE.stick) : 0;
+  const stickDown = (onSurface && !launched && !s.wallRunning && !grappling && s.vy <= 0 && !s.climbing) ? m(MOVE.stick) : 0;
   const c = movePlayer(ctx, s.vx * STEP, s.vy * STEP - stickDown, s.vz * STEP, h);
   s.height = h;
   if (s.vy > 0 && c.y < s.vy * STEP * 0.5) s.vy = 0;        // bonked a ceiling: stop rising

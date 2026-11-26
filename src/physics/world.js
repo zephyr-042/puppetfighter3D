@@ -7,7 +7,7 @@
 // Loads after: config.js, game/maps.js, physics/ragdoll.js (collision-group constants only)
 
 import RAPIER from '@dimforge/rapier3d-compat';
-import { SCALE, STEP, m, PUPPET, MOVE, WALLRUN, MAP } from '../config.js';
+import { SCALE, STEP, m, PUPPET, MOVE, WALLRUN, MAP, GRAPPLE } from '../config.js';
 import DISTRICT_MAP, { floorSlabs, rampSpan } from '../game/maps.js';
 import { WALL_GROUP, PLAYER_GROUP } from './ragdoll.js';
 
@@ -95,7 +95,7 @@ export function addPlayerCapsule(ctx) {
     RAPIER.ColliderDesc.capsule(halfCyl, radius).setCollisionGroups(PLAYER_GROUPS), body
   );
   const player = { body, collider, controller, halfCyl, radius, height: m(PUPPET.height), vy: 0, grounded: false };
-  const view = { RAPIER, world, player };
+  const view = { RAPIER, world, player, all: ctx.players };   // `all`: every capsule view (grapple shots at players)
   ctx.players.push(view);
   return view;
 }
@@ -217,6 +217,44 @@ export function groundGap(ctx, maxDist) {
   const ray = new RAPIER.Ray({ x: t.x, y: t.y, z: t.z }, { x: 0, y: -1, z: 0 });
   const h = world.castRay(ray, half + maxDist, true, undefined, WALL_RAY_GROUPS, player.collider);
   return h ? Math.max(0, h.timeOfImpact - half) : Infinity;
+}
+
+// Grapple shot. origin / dir are world-space metres ({x, y, z}; dir need not be unit length), maxDist in metres.
+// Checks static level geometry (WALL_GROUP) with a real ray, and every OTHER capsule (not ownerIdx, not skip(idx)) within
+// GRAPPLE.playerRange with a ray-vs-capsule test fattened by GRAPPLE.aimPad (aim assist). The closest hit wins; a player
+// behind a wall is not hit. Returns { hit, point: {x, y, z} | null, targetPlayer: -1 | index }.
+export function raycastGrapple(ctx, origin, dir, maxDist, ownerIdx = -1, skip = null) {
+  const { RAPIER, world, player } = ctx;
+  const none = { hit: false, point: null, targetPlayer: -1 };
+  const dl = Math.hypot(dir.x, dir.y, dir.z);
+  if (dl < 1e-6) return none;
+  const d = { x: dir.x / dl, y: dir.y / dl, z: dir.z / dl };
+  let best = maxDist, out = none;
+  const sh = world.castRay(new RAPIER.Ray(origin, d), maxDist, true, undefined, WALL_RAY_GROUPS, player.collider);
+  if (sh) {
+    best = sh.timeOfImpact;
+    out = { hit: true, point: { x: origin.x + d.x * best, y: origin.y + d.y * best, z: origin.z + d.z * best }, targetPlayer: -1 };
+  }
+  const reach = Math.min(m(GRAPPLE.playerRange), maxDist);
+  const R = player.radius + m(GRAPPLE.aimPad);
+  const all = ctx.all || [];
+  for (let i = 0; i < all.length; i++) {
+    if (i === ownerIdx || (skip && skip(i))) continue;
+    const q = all[i].player, t = q.body.translation();
+    // the capsule's core is a vertical segment a..b; find the closest approach between it and the ray
+    const ay = t.y - q.halfCyl, ey = 2 * q.halfCyl;                  // segment: (t.x, ay + u * ey, t.z), u in [0, 1]
+    const wx = t.x - origin.x, wy = ay - origin.y, wz = t.z - origin.z;
+    const A = ey * ey, B = ey * d.y, D = ey * wy, E = d.x * wx + d.y * wy + d.z * wz;
+    let u = 0;
+    if (A > 1e-9 && A - B * B > 1e-9) u = (B * E - D) / (A - B * B);
+    u = Math.max(0, Math.min(1, u));
+    const s = Math.max(0, Math.min(reach, E + u * B));               // ray parameter, limited to the reach
+    if (A > 1e-9) u = Math.max(0, Math.min(1, (origin.y + d.y * s - ay) / ey));   // best point on the segment for that s
+    const px = t.x, py = ay + u * ey, pz = t.z;
+    const dist = Math.hypot(origin.x + d.x * s - px, origin.y + d.y * s - py, origin.z + d.z * s - pz);
+    if (dist <= R && s < best) { best = s; out = { hit: true, point: { x: px, y: py, z: pz }, targetPlayer: i }; }
+  }
+  return out;
 }
 
 export { SCALE };

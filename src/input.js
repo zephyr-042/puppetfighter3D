@@ -11,7 +11,11 @@ window.addEventListener('keydown', (e) => {
   keys[e.code] = true;
 });
 window.addEventListener('keyup', (e) => { keys[e.code] = false; });
-window.addEventListener('blur', () => { for (const k in keys) keys[k] = false; jumpQueued = false; dashQueued = false; });
+let grappleMouse = false;                            // right mouse button held
+window.addEventListener('mousedown', (e) => { if (e.button === 2) grappleMouse = true; });
+window.addEventListener('mouseup', (e) => { if (e.button === 2) grappleMouse = false; });
+window.addEventListener('contextmenu', (e) => { if (e.target && e.target.tagName === 'CANVAS') e.preventDefault(); });   // no browser menu on the game canvas
+window.addEventListener('blur', () => { for (const k in keys) keys[k] = false; jumpQueued = false; dashQueued = false; grappleMouse = false; });
 
 // Snapshot for one tick. `f` = camera forward on the ground ({x, z}, unit length).
 // jump / dash: true on the tick after Space / F was pressed (edge, not held). slide: Shift is held. fwd: W is held.
@@ -29,5 +33,6 @@ export function readInput(f) {
   const dash = dashQueued; dashQueued = false;
   const slide = !!(keys.ShiftLeft || keys.ShiftRight);   // held, not an edge
   const fwd = !!keys.KeyW;                               // forward held (wall-running needs it)
-  return { ax, az, moving: l > 0, fwd, jump, dash, slide };
+  const grapple = !!(keys.KeyE || grappleMouse);         // held (E or right mouse); player.js fires on the press edge
+  return { ax, az, moving: l > 0, fwd, jump, dash, slide, grapple };
 }

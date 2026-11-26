@@ -80,6 +80,25 @@ export const DASH = {
   airGrav: 250,        // units / s^2 while dashing (floaty, so a dash carries across gaps)
 };
 
+// ---- grapple / sticky hand (hold E or right mouse): hooks level geometry or another player, pulls you toward the anchor
+// while keeping your sideways speed (swing arc). Space while hooked = release with an upward pop.
+export const GRAPPLE = {
+  maxRange: 1120,      // old units (28 m): longest shot at level geometry
+  playerRange: 640,    // old units (16 m): longest shot at another player
+  pullAccel: 1450,     // units / s^2 added toward the anchor while hooked
+  maxPullSpeed: 780,   // units / s: cap on the speed TOWARD the anchor (sideways speed is untouched, so a swing keeps its arc)
+  detachJumpBoost: 180, // units / s: Space while hooked sets vy to at least this on release
+  cooldown: 1.6,       // s after any release
+  maxDuration: 2.2,    // s a hook can be held
+  missCooldown: 0.3,   // s after a shot that hit nothing
+  gravity: 450,        // units / s^2 while hooked (lighter than JUMP.gravRise / gravFall, so swings carry)
+  detachDist: 72,      // units (1.8 m): reaching the anchor this closely ends the hook (on a player: shove + stun)
+  hitStun: 0.4,        // s of stun on a player the hook reaches
+  hitShove: 220,       // units / s: minimum shove on that player (away from the grappler)
+  aimPad: 20,          // units: aim-assist added to the capsule radius when shooting at players
+  torso: 0.6,          // fraction of the current height where the rope leaves the body / the pull is measured from
+};
+
 // ---- crouch-slide (old units)
 export const SLIDE = {
   height: 40,          // capsule height while sliding (40 units = 1.0 m; standing is PUPPET.height = 72 = 1.8 m)
