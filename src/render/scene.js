@@ -1,12 +1,14 @@
 // src/render/scene.js
 // RENDER (1/2): the Three.js renderer, lights, the District map (floor slabs with rim trims, boxes, pillars, ramp wedges),
-// the dark city backdrop, and the placeholder capsule puppet (squashes while sliding).
+// and one puppet per player: a faceless coloured capsule (squashes while sliding) plus a hidden 6-part ragdoll mesh set that
+// matches RAGDOLL_RIG, and the red "IT" cone marker. No background geometry at all (no skyline, facade or street): just the sky gradient.
 // Meshes are built from the same map data and helpers (game/maps.js) as the physics colliders, so they always match.
-// Loads after: config.js, game/maps.js
+// Loads after: config.js, game/maps.js, physics/ragdoll.js (RAGDOLL_RIG dimensions only)
 
 import * as THREE from 'three';
 import { m, PUPPET, CAM, MAP } from '../config.js';
 import DISTRICT_MAP, { floorSlabs, rampSpan } from '../game/maps.js';
+import { RAGDOLL_RIG } from '../physics/ragdoll.js';
 
 const FLOOR_COLOR = 0x4a5662, TRIM_COLOR = 0x9aa4b4, TILE_M = 5;   // floor grid tile (metres): gives a sense of speed
 
@@ -46,42 +48,55 @@ export function buildRampGeometry(r) {
   return geo;
 }
 
-// Dark skyline + the building shaft under the roof, so looking over the edge (or down a skylight) feels high up.
-function addCityBackdrop(scene, map) {
-  const rhw = m(map.rect.hw), rhd = m(map.rect.hd);
-
-  // facade: four thin dark walls hanging 200 m below the roof edge (the roof is the top of a tall building; skylights look into the shaft)
-  const FACADE_H = 200, T = 1;
-  const facadeMat = new THREE.MeshLambertMaterial({ color: 0x141c30 });
-  const wall = (cx, cz, sx, sz) => {
-    const w = new THREE.Mesh(new THREE.BoxGeometry(sx, FACADE_H, sz), facadeMat);
-    w.position.set(cx, -FACADE_H / 2, cz); scene.add(w);
-  };
-  wall(0, -rhd - T / 2, 2 * rhw + 2 * T, T);  wall(0, rhd + T / 2, 2 * rhw + 2 * T, T);
-  wall(-rhw - T / 2, 0, T, 2 * rhd);          wall(rhw + T / 2, 0, T, 2 * rhd);
-  const shaftFloor = new THREE.Mesh(new THREE.PlaneGeometry(2 * rhw, 2 * rhd), new THREE.MeshBasicMaterial({ color: 0x05080f }));
-  shaftFloor.rotation.x = -Math.PI / 2; shaftFloor.position.y = -FACADE_H; scene.add(shaftFloor);
-
-  // street level far below
-  const street = new THREE.Mesh(new THREE.PlaneGeometry(4000, 4000), new THREE.MeshBasicMaterial({ color: 0x090e1a }));
-  street.rotation.x = -Math.PI / 2; street.position.y = -260; scene.add(street);
-
-  // distant skyscrapers: deterministic pseudo-random boxes outside the roof, tops anywhere from far below to well above the roof
-  let seed = 20241126;
-  const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
-  const bMat = [0x151d33, 0x182139, 0x121a2e].map((c) => new THREE.MeshLambertMaterial({ color: c }));
-  const clearX = rhw + 28, clearZ = rhd + 28;                    // keep a gap between the roof and the nearest tower
-  let placed = 0;
-  for (let tries = 0; tries < 600 && placed < 90; tries++) {
-    const ang = rnd() * Math.PI * 2, rad = 90 + rnd() * 520;
-    const x = Math.cos(ang) * rad * 1.5, z = Math.sin(ang) * rad;
-    const w = 14 + rnd() * 30, d = 14 + rnd() * 30;
-    if (Math.abs(x) < clearX + w / 2 && Math.abs(z) < clearZ + d / 2) continue;
-    const top = -140 + rnd() * rnd() * 330;                      // biased low, a few towers rise above the roof
-    const h = top + 260;
-    const b = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), bMat[placed % 3]);
-    b.position.set(x, -260 + h / 2, z); scene.add(b); placed++;
+// ---- puppets ---------------------------------------------------------------------------------------------------------------
+// Geometry is shared by every puppet; each puppet owns one coloured material. Everything is faceless by design.
+let capsuleGeo = null, ragGeo = null;
+function getGeos() {
+  if (!capsuleGeo) {
+    const radius = m(PUPPET.radius), total = m(PUPPET.height), R = RAGDOLL_RIG;
+    capsuleGeo = new THREE.CapsuleGeometry(radius, total - 2 * radius, 6, 14);
+    ragGeo = {
+      torso: new THREE.BoxGeometry(R.torso.hx * 2, R.torso.hy * 2, R.torso.hz * 2),
+      head: new THREE.SphereGeometry(R.head.r, 14, 10),
+      arm: new THREE.CapsuleGeometry(R.arm.r, R.arm.hh * 2, 4, 8),
+      leg: new THREE.CapsuleGeometry(R.leg.r, R.leg.hh * 2, 4, 8)
+    };
   }
+  return { capsuleGeo, ragGeo };
+}
+
+// One puppet: `capsule` (origin = feet) for normal play and `parts` (6 meshes with origin at the body centre, positioned in WORLD
+// space by ragdoll.js syncRagdollMeshes) for the on-demand ragdoll. Only one of the two is visible at a time.
+function createPuppet(scene, color) {
+  const { capsuleGeo, ragGeo } = getGeos();
+  const total = m(PUPPET.height);
+  const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.6 });
+
+  const capsule = new THREE.Group();
+  const body = new THREE.Mesh(capsuleGeo, mat);
+  body.position.y = total / 2;
+  body.castShadow = true;
+  capsule.add(body);
+  scene.add(capsule);
+
+  const ragGroup = new THREE.Group();
+  const part = (geo) => { const mesh = new THREE.Mesh(geo, mat); mesh.castShadow = true; ragGroup.add(mesh); return mesh; };
+  const parts = {
+    torso: part(ragGeo.torso), head: part(ragGeo.head),
+    armL: part(ragGeo.arm), armR: part(ragGeo.arm),
+    legL: part(ragGeo.leg), legR: part(ragGeo.leg)
+  };
+  ragGroup.visible = false;
+  scene.add(ragGroup);
+
+  return {
+    capsule, parts,
+    // squash / stretch the capsule to the current collider height (metres). Feet stay at the origin.
+    setHeight(h) { body.scale.y = h / total; body.position.y = h / 2; },
+    setFeet(x, y, z) { capsule.position.set(x, y, z); },
+    showCapsule(v) { capsule.visible = v; },
+    showRagdoll(v) { ragGroup.visible = v; }
+  };
 }
 
 export function createScene() {
@@ -101,13 +116,14 @@ export function createScene() {
   scene.background = skyTex;
   scene.fog = new THREE.Fog(0x0f1830, 160, 900);
 
-  const camera = new THREE.PerspectiveCamera(CAM.fov, window.innerWidth / window.innerHeight, 0.1, 1600);
+  // far = 400 m: the roof is ~105 m across and there is no background geometry, so nothing lives beyond that
+  const camera = new THREE.PerspectiveCamera(CAM.fov, window.innerWidth / window.innerHeight, 0.1, 400);
 
   // lights: the sun follows the player (see setFocus) so one shadow map covers the area around you
   scene.add(new THREE.HemisphereLight(0xcfdcff, 0x4a5468, 1.5));    // strong ambient: wall faces must stay readable at speed
   const sun = new THREE.DirectionalLight(0xdfe8ff, 1.6);
   sun.castShadow = true;
-  sun.shadow.mapSize.set(4096, 4096);
+  sun.shadow.mapSize.set(1024, 1024);                  // 1024 keeps District at 60+ FPS (was 4096)
   const sc = sun.shadow.camera;
   sc.left = -45; sc.right = 45; sc.top = 45; sc.bottom = -45; sc.near = 1; sc.far = 200;
   sun.shadow.bias = -0.0004;
@@ -124,6 +140,7 @@ export function createScene() {
     tex.offset.set(((m(s.x - s.hw)) / TILE_M) % 1, (-(D + m(s.z - s.hd)) / TILE_M) % 1);
     const mesh = new THREE.Mesh(new THREE.BoxGeometry(W, ft, D), new THREE.MeshStandardMaterial({ map: tex, roughness: 0.9 }));
     mesh.position.set(m(s.x), -ft / 2, m(s.z));
+    mesh.castShadow = false;                                           // the floor never needs to cast: nothing is under it
     mesh.receiveShadow = true;
     scene.add(mesh);
   }
@@ -132,7 +149,7 @@ export function createScene() {
   const lip = m(map.rect.lip), TH = 0.05, trimMat = new THREE.MeshStandardMaterial({ color: TRIM_COLOR, roughness: 0.6 });
   const trim = (x0, x1, z0, z1) => {                                   // metres, axis-aligned rectangle on the floor
     const t = new THREE.Mesh(new THREE.BoxGeometry(x1 - x0, TH, z1 - z0), trimMat);
-    t.position.set((x0 + x1) / 2, TH / 2, (z0 + z1) / 2); t.receiveShadow = true; scene.add(t);
+    t.position.set((x0 + x1) / 2, TH / 2, (z0 + z1) / 2); t.castShadow = false; t.receiveShadow = true; scene.add(t);
   };
   const rx = m(map.rect.hw), rz = m(map.rect.hd);
   trim(-rx, rx, -rz, -rz + lip); trim(-rx, rx, rz - lip, rz);                 // north / south edge
@@ -167,31 +184,21 @@ export function createScene() {
     scene.add(mesh);
   }
 
-  addCityBackdrop(scene, map);
-
-  // placeholder puppet: capsule plus a small "nose" box so facing is visible. Origin = feet.
-  const radius = m(PUPPET.radius), total = m(PUPPET.height);
-  const puppet = new THREE.Group();
-  const body = new THREE.Mesh(
-    new THREE.CapsuleGeometry(radius, total - 2 * radius, 8, 16),
-    new THREE.MeshStandardMaterial({ color: 0x3498db, roughness: 0.6 })
+  // ---- IT marker: ONE emissive red cone, tip down, hovering above whoever is IT (bobs a little)
+  const itMarker = new THREE.Mesh(
+    new THREE.ConeGeometry(0.22, 0.45, 12),
+    new THREE.MeshStandardMaterial({ color: 0xff2a2a, emissive: 0xff1010, emissiveIntensity: 1.6, roughness: 0.4 })
   );
-  body.position.y = total / 2;
-  body.castShadow = true;
-  puppet.add(body);
-  const nose = new THREE.Mesh(
-    new THREE.BoxGeometry(radius * 0.8, radius * 0.5, radius * 0.9),
-    new THREE.MeshStandardMaterial({ color: 0xffffff })
-  );
-  nose.position.set(0, total * 0.8, radius);       // faces local +z
-  puppet.add(nose);
-  scene.add(puppet);
+  itMarker.rotation.x = Math.PI;                                       // ConeGeometry points up; flip it so the tip points down
+  itMarker.visible = false;
+  scene.add(itMarker);
 
-  // squash / stretch the capsule to the current collider height (metres). Feet stay at the origin.
-  function setPuppetHeight(h) {
-    body.scale.y = h / total;
-    body.position.y = h / 2;
-    nose.position.y = h * 0.8;
+  // (x, y, z) = point just above the IT puppet's head, in metres; t = time in seconds for the bob. Pass null to hide.
+  function setItMarker(pos, t = 0) {
+    if (!pos) { itMarker.visible = false; return; }
+    itMarker.visible = true;
+    itMarker.position.set(pos.x, pos.y + 0.12 * Math.sin(t * 5), pos.z);
+    itMarker.rotation.y = t * 2;
   }
 
   // keep the sun (and its shadow box) around the player, so the whole 105 m roof gets shadows where you actually are
@@ -207,5 +214,5 @@ export function createScene() {
     camera.updateProjectionMatrix();
   });
 
-  return { renderer, scene, camera, puppet, setPuppetHeight, setFocus };
+  return { renderer, scene, camera, addPuppet: (color) => createPuppet(scene, color), setItMarker, setFocus };
 }
