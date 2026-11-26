@@ -1,49 +1,310 @@
 // src/main.js
-// MAIN: boots the world + scene, reads the keyboard, runs the fixed 60 Hz step decoupled from rendering. Loads LAST.
-// Movement rules live in physics/player.js, keyboard in input.js; this file keeps just the loop and the wiring.
+// MAIN: boots the world + scene, runs the 6-player tag match (1 human + 5 bots), the fixed 60 Hz step decoupled from rendering,
+// the on-demand cosmetic ragdolls and the match HUD. Loads LAST.
+// Movement rules live in physics/player.js, tag rules in game/rules.js, keyboard in input.js; this file is the wiring.
+//
+// One tick (STEP = 1/60):
+//   1. every player: input (human keyboard / botInput / locked) -> stepPlayer -> queued kinematic move
+//   2. stepWorld: all capsules move (and ragdolls tumble)
+//   3. capsules -> game state (positions in metres, velocities, flags, fell)
+//   4. stepGameRules: tags, shoves, trips, soft separation, IT time, rounds
+//   5. game state -> capsules: knock velocities, separation nudges, ragdoll spawn / despawn, round reset
 // Loads after: everything
 
 import { STEP, MAX_STEPS_PER_FRAME, SCALE, RUN, CAM, PUPPET, MAP, m } from './config.js';
 import DISTRICT_MAP from './game/maps.js';
-import { createWorld, stepWorld, feetPos, teleportPlayer, hasFallen } from './physics/world.js';
-import { createPlayerState, stepPlayer } from './physics/player.js';
+import { createGameState, addPlayer, resetRoundPlayers, startMatch, drainEvents } from './game/state.js';
+import { stepGameRules } from './game/rules.js';
+import { createWorld, addPlayerCapsule, stepWorld, feetPos, placePlayer, nudgePlayer, hasFallen } from './physics/world.js';
+import { createPlayerState, stepPlayer, IDLE_INPUT } from './physics/player.js';
+import { spawnRagdoll, syncRagdollMeshes, despawnRagdoll } from './physics/ragdoll.js';
 import { readInput } from './input.js';
 import { createScene } from './render/scene.js';
 import { createCameraRig, forwardOf, updateCamera } from './render/camera.js';
+
+const NUM_BOTS = 5;                 // 1 human + 5 bots = MAX_PLAYERS (6)
+const FALL_DOWN = 1.2;              // s a player who fell stays "down" (ragdoll tumbling into the void) before reappearing on a spawn
+const LIMBO_Y = -1000;              // rules see a downed player this far below the map, so nobody can tag / bump the empty spawn
+const $ = (id) => document.getElementById(id);
 
 async function boot() {
   const ctx = await createWorld();
   const view = createScene();
   const rig = createCameraRig(view.renderer.domElement);
 
-  const state = createPlayerState();
-  const hud = document.getElementById('hud');
-
-  // ---- spawn: DISTRICT_MAP.spawns[MAP.spawn], or ?spawn=N in the URL (handy for testing a part of the map)
-  const spawns = DISTRICT_MAP.spawns;
+  // ---- spawns: DISTRICT_MAP.spawns are old units, game state is metres. ?spawn=N gives the HUMAN spawn N (rotates the list).
+  const raw = DISTRICT_MAP.spawns;
   const asked = parseInt(new URLSearchParams(location.search).get('spawn'), 10);
-  const spawn = spawns[Number.isInteger(asked) && asked >= 0 && asked < spawns.length ? asked : MAP.spawn];
-  function respawn() {
-    teleportPlayer(ctx, spawn.x, spawn.y, spawn.z);
-    Object.assign(state, createPlayerState());                // all momentum, timers and chains reset
-    const dx = -spawn.x, dz = -spawn.z, l = Math.hypot(dx, dz) || 1;   // face the middle of the roof
-    state.facing = Math.atan2(dx, dz);
-    rig.yaw = Math.atan2(-dx / l, -dz / l);
-    rig.pitch = 0.25;
-  }
-  respawn();
-  let wantRespawn = false;
-  window.addEventListener('keydown', (e) => { if (e.code === 'KeyR' && !e.repeat) wantRespawn = true; });
+  const first = Number.isInteger(asked) && asked >= 0 && asked < raw.length ? asked : MAP.spawn;
+  const spawnsM = raw.map((_, k) => { const s = raw[(first + k) % raw.length]; return { x: m(s.x), y: m(s.y), z: m(s.z) }; });
 
-  // one fixed simulation tick
+  // ---- game state: player 0 = human, 1..5 = bots
+  const gs = createGameState({ spawns: spawnsM });
+  addPlayer(gs, { name: 'YOU' });
+  for (let b = 1; b <= NUM_BOTS; b++) addPlayer(gs, { name: 'BOT ' + b });
+  resetRoundPlayers(gs, spawnsM);
+  gs.round = 1; gs.mode = 'countdown'; gs.countdownLeft = gs.countdownTime;   // same as startMatch()
+  let lastRound = gs.round;
+
+  const N = gs.players.length;
+  const views = [], states = [], puppets = [], brains = [];
+  const rags = new Array(N).fill(null);        // live ragdoll (or null) per player
+  const limbo = new Array(N).fill(0);          // seconds left "down" after a fall
+  const forceFall = new Array(N).fill(false);  // R key (human)
+  const torso = Array.from({ length: N }, () => ({ x: 0, y: 0, z: 0 }));   // ragdoll torso position (chase camera / IT marker)
+  const sent = Array.from({ length: N }, () => ({ x: 0, z: 0, vx: 0, vz: 0 }));   // what we wrote into the game state this tick
+  for (let i = 0; i < N; i++) {
+    views.push(addPlayerCapsule(ctx));
+    states.push(createPlayerState());
+    puppets.push(view.addPuppet(gs.players[i].color));
+    brains.push({ t: 0, px: 0, pz: 0, stuck: 0, side: 1, hop: false, jumpT: 1 + gs.rng() * 2, dashDelay: 0, phase: gs.rng() * 6.28 });
+  }
+
+  // ---- ragdolls -------------------------------------------------------------------------------------------------------------
+  function startRagdoll(i, pos, vel, imp, yaw) {
+    if (rags[i]) despawnRagdoll(ctx.world, rags[i]);
+    rags[i] = spawnRagdoll(ctx.RAPIER, ctx.world, pos, vel, imp, { yaw, rng: gs.rng });
+  }
+  function killRagdoll(i) {
+    if (rags[i]) { despawnRagdoll(ctx.world, rags[i]); rags[i] = null; }
+    puppets[i].showRagdoll(false); puppets[i].showCapsule(true);
+  }
+
+  // ---- placing players on their game-state positions (match start, new round, restart) --------------------------------------
+  function faceCenter(i) {
+    const p = gs.players[i];
+    states[i].facing = p.yaw = Math.atan2(-p.x, -p.z);   // face the middle of the roof
+    if (i === 0) { rig.yaw = Math.atan2(p.x, p.z); rig.pitch = 0.25; }
+  }
+  function placeAll() {
+    gs.players.forEach((p, i) => {
+      placePlayer(views[i], p.x, p.y, p.z, false);
+      states[i] = createPlayerState();                    // all momentum, timers and chains reset
+      states[i].isIt = p.isIt;
+      limbo[i] = 0; forceFall[i] = false;
+      killRagdoll(i);
+      faceCenter(i);
+    });
+    stepWorld(ctx);                                       // one step so the query structures see every new position
+  }
+  placeAll();
+
+  window.addEventListener('keydown', (e) => {
+    if (e.repeat) return;
+    if (e.code === 'KeyR') forceFall[0] = true;                         // "I am stuck": handled exactly like a fall
+    if (e.code === 'Enter' && gs.mode === 'matchend') wantRestart = true;
+  });
+  let wantRestart = false;
+
+  // ---- bots ----------------------------------------------------------------------------------------------------------------
+  // Lightweight steering, no pathfinding. IT bot: run at the nearest runner (leading its movement a little), hop now and then,
+  // dash / jump when close. Runner bot: run directly away from IT with a weave, dash when IT is close (a dash shoves IT away).
+  // Both stay off the roof edge and out of the skylights (looking 0.5 s ahead along their velocity) and un-stick themselves.
+  const RX = m(DISTRICT_MAP.rect.hw), RZ = m(DISTRICT_MAP.rect.hd), EDGE = 7, HOLE_MARGIN = 3;
+  const HOLES = DISTRICT_MAP.holes.map((h) => ({ x: m(h.x), z: m(h.z), hw: m(h.hw), hd: m(h.hd) }));
+
+  function botInput(gs, idx) {
+    const me = gs.players[idx], s = states[idx], b = brains[idx];
+    const inp = { ax: 0, az: 0, moving: false, fwd: false, jump: false, dash: false, slide: false };
+    let wx = 0, wz = 0, near = Infinity, dashRange = 0;
+
+    if (me.isIt) {
+      let tgt = null;
+      for (const q of gs.players) {
+        if (q === me || q.y < -50) continue;              // skip downed players
+        const d = Math.hypot(q.x - me.x, q.z - me.z);
+        if (d < near) { near = d; tgt = q; }
+      }
+      if (tgt) {
+        const lead = Math.min(0.4, near / 20);
+        const tx = tgt.x + tgt.vx * lead - me.x, tz = tgt.z + tgt.vz * lead - me.z, l = Math.hypot(tx, tz) || 1;
+        wx = tx / l; wz = tz / l; dashRange = 5.5;
+      }
+    } else {
+      const it = gs.players.find((q) => q.isIt && q.y > -50);
+      if (it) {
+        const fx = me.x - it.x, fz = me.z - it.z;
+        near = Math.hypot(fx, fz) || 1;
+        const weave = Math.sin(performance.now() * 0.0009 + b.phase) * 0.5;
+        wx = fx / near - (fz / near) * weave;
+        wz = fz / near + (fx / near) * weave;
+        dashRange = 4.2;
+      } else { wx = -me.x * 0.02; wz = -me.z * 0.02; }    // nobody to flee from: drift toward the middle
+    }
+
+    // stay on the roof and out of the skylights (predicted position)
+    const px = me.x + s.vx * 0.5, pz = me.z + s.vz * 0.5;
+    if (px > RX - EDGE) wx -= (px - (RX - EDGE)) / EDGE * 3;
+    if (px < -RX + EDGE) wx += ((-RX + EDGE) - px) / EDGE * 3;
+    if (pz > RZ - EDGE) wz -= (pz - (RZ - EDGE)) / EDGE * 3;
+    if (pz < -RZ + EDGE) wz += ((-RZ + EDGE) - pz) / EDGE * 3;
+    for (const h of HOLES) {
+      const ox = Math.abs(px - h.x) - h.hw, oz = Math.abs(pz - h.z) - h.hd;     // distance outside the hole rectangle
+      const out = Math.max(ox, oz);
+      if (out < HOLE_MARGIN) {
+        const d = Math.hypot(px - h.x, pz - h.z) || 1, k = 3 * (1 - out / HOLE_MARGIN);
+        wx += (px - h.x) / d * k; wz += (pz - h.z) / d * k;
+      }
+    }
+
+    // stuck? (barely moved in 0.5 s while it should be running): strafe sideways and hop
+    b.t += STEP;
+    if (b.t >= 0.5) {
+      if (Math.hypot(me.x - b.px, me.z - b.pz) < 0.8) { b.stuck = 0.7; b.hop = true; b.side = gs.rng() < 0.5 ? -1 : 1; }
+      b.t = 0; b.px = me.x; b.pz = me.z;
+    }
+    if (b.stuck > 0) {
+      b.stuck -= STEP;
+      const tx = wx, tz = wz;
+      wx = -tz * b.side + tx * 0.2; wz = tx * b.side + tz * 0.2;
+    }
+
+    // jump: an occasional hop (keeps the b-hop / air-strafe feel) and one when stuck or the other player is right there
+    b.jumpT -= STEP;
+    if (b.hop) { inp.jump = true; b.hop = false; }
+    else if (b.jumpT <= 0) { inp.jump = near < 12 || gs.rng() < 0.5; b.jumpT = 1.2 + gs.rng() * 1.8; }
+
+    const l = Math.hypot(wx, wz);
+    if (l > 1e-4) { inp.ax = wx / l; inp.az = wz / l; inp.moving = true; inp.fwd = true; }
+
+    // dash when close (needs a direction; the dash locks it)
+    b.dashDelay -= STEP;
+    if (inp.moving && near < dashRange && s.dashCd <= 0 && s.dashT <= 0 && b.dashDelay <= 0) {
+      inp.dash = true; b.dashDelay = 0.2 + gs.rng() * 0.5;
+    }
+    return inp;
+  }
+
+  // ---- one fixed simulation tick --------------------------------------------------------------------------------------------
   function tick() {
-    if (wantRespawn) { wantRespawn = false; respawn(); }
-    stepPlayer(state, readInput(forwardOf(rig)), ctx);
+    if (wantRestart) {                                    // Enter after the match: new match, scores to 0
+      wantRestart = false;
+      startMatch(gs, spawnsM); lastRound = gs.round; placeAll();
+    }
+
+    // 1. input + movement for every capsule
+    for (let i = 0; i < N; i++) {
+      const p = gs.players[i], s = states[i];
+      if (limbo[i] > 0) { limbo[i] -= STEP; if (limbo[i] <= 0) { limbo[i] = 0; killRagdoll(i); } }
+      s.isIt = p.isIt;
+      s.locked = gs.mode !== 'play' || p.stun > 0 || limbo[i] > 0;      // stunned: skip input so the knockback plays out
+      const snap = i === 0 ? readInput(forwardOf(rig)) : (s.locked ? IDLE_INPUT : botInput(gs, i));   // (the human's latches must drain every tick)
+      stepPlayer(s, snap, views[i]);
+    }
+
+    // 2. all capsules move
     stepWorld(ctx);
-    if (hasFallen(ctx)) respawn();                            // off the roof or down a skylight
+
+    // 3. capsules -> game state
+    for (let i = 0; i < N; i++) {
+      const p = gs.players[i], s = states[i], v = views[i];
+      let fell = false;
+      if (limbo[i] <= 0 && (hasFallen(v) || forceFall[i])) {
+        fell = true; forceFall[i] = false;
+        // ragdoll tumbles where the player fell; the capsule is parked on its spawn point and stays hidden while "down"
+        const f = feetPos(v);
+        startRagdoll(i, f, { x: s.vx, y: Math.min(s.vy, 0), z: s.vz }, { x: s.vx * 0.5, y: 0, z: s.vz * 0.5 }, s.facing);
+        limbo[i] = FALL_DOWN;
+        const sp = gs.spawns[i % gs.spawns.length];
+        placePlayer(v, sp.x, sp.y || 0, sp.z, false);
+        states[i] = createPlayerState(); states[i].isIt = p.isIt; states[i].locked = true;
+        states[i].facing = Math.atan2(-sp.x, -sp.z);
+      }
+      const t = states[i], f = feetPos(v);
+      if (limbo[i] > 0) {                                  // down: invisible to the rules (far below the map, no velocity)
+        p.x = f.x; p.y = LIMBO_Y; p.z = f.z; p.vx = p.vy = p.vz = 0;
+        p.sliding = p.dashing = false; p.fell = fell;
+      } else {
+        p.x = f.x; p.y = f.y; p.z = f.z;
+        p.vx = t.vx; p.vy = t.vy; p.vz = t.vz; p.yaw = t.facing;
+        p.sliding = t.sliding; p.dashing = t.dashT > 0; p.grabbing = false;
+        p.runT = t.runT; p.bhopChain = t.bhopChain; p.fell = false;
+      }
+      const sn = sent[i]; sn.x = p.x; sn.z = p.z; sn.vx = p.vx; sn.vz = p.vz;
+    }
+
+    // 4. tag rules (tags, shoves, trips, soft separation, IT time, rounds)
+    stepGameRules(gs, STEP);
+
+    // 5. game state -> capsules
+    if (gs.round !== lastRound) {                          // rules started a new round: everybody back on a spawn
+      lastRound = gs.round;
+      placeAll();
+      return;
+    }
+    for (let i = 0; i < N; i++) {
+      if (limbo[i] > 0) continue;
+      const p = gs.players[i], s = states[i], sn = sent[i];
+      if (p.vx !== sn.vx || p.vz !== sn.vz) {              // the rules knocked this player (tag / shove / trip)
+        s.vx = p.vx; s.vz = p.vz; s.runT = p.runT; s.bhopChain = p.bhopChain;
+        s.dashT = 0; s.sliding = false;
+      }
+      const dx = p.x - sn.x, dz = p.z - sn.z;              // soft separation from collidePlayers: read back into the capsule
+      if (dx * dx + dz * dz > 1e-10) nudgePlayer(views[i], dx, dz);
+
+      if (p.stun > 0) {                                    // stunned: cosmetic ragdoll (the capsule stays the truth, hidden)
+        if (!rags[i]) startRagdoll(i, { x: p.x, y: p.y, z: p.z }, { x: s.vx, y: Math.max(s.vy, 0) + 2, z: s.vz },
+                                   { x: s.vx * 1.5, y: 4, z: s.vz * 1.5 }, s.facing);
+      } else if (rags[i]) killRagdoll(i);                  // stun over: capsule is back
+    }
   }
 
-  // render loop: accumulate real time, run whole ticks, then draw
+  // ---- HUD ----------------------------------------------------------------------------------------------------------------------
+  const el = { hud: $('hud'), round: $('round'), timer: $('timer'), status: $('status'), board: $('board'),
+               banner: $('banner'), bMain: $('bannerMain'), bSub: $('bannerSub'), toast: $('toast') };
+  const hex = (c) => '#' + c.toString(16).padStart(6, '0');
+  const fmt = (t) => { t = Math.max(0, Math.ceil(t)); return Math.floor(t / 60) + ':' + String(t % 60).padStart(2, '0'); };
+  const pname = (id) => (gs.players[id] ? gs.players[id].name : '?');
+  let flashGo = 0, toastT = 0, boardT = 0, lastBoard = '';
+
+  function handleEvents() {
+    for (const e of drainEvents(gs)) {
+      if (e.type === 'go') flashGo = 0.9;
+      else if (e.type === 'tag') { el.toast.textContent = pname(e.from) + ' tagged ' + pname(e.to); toastT = 1.6; }
+      else if (e.type === 'shove') { el.toast.textContent = pname(e.from) + ' shoved ' + pname(e.to) + ' away'; toastT = 1.6; }
+      else if (e.type === 'trip') { el.toast.textContent = pname(e.from) + ' tripped ' + pname(e.to); toastT = 1.6; }
+      else if (e.type === 'fell') { el.toast.textContent = pname(e.id) + ' fell off and is IT!'; toastT = 1.8; }
+    }
+  }
+
+  function updateHud(dt) {
+    const me = gs.players[0];
+    handleEvents();
+    el.round.textContent = 'ROUND ' + gs.round;
+    const tl = gs.mode === 'play' ? gs.timeLeft : gs.mode === 'countdown' ? gs.roundTime : 0;
+    el.timer.textContent = fmt(tl);
+    el.timer.className = gs.mode === 'play' && gs.timeLeft <= 10 ? 'low' : '';
+    el.status.textContent = me.isIt ? 'TAG THEM!' : 'RUN!';
+    el.status.className = me.isIt ? 'it' : 'run';
+
+    // live leaderboard: least IT time first (lowest IT time wins the round); refreshed ~7x / s
+    boardT -= dt;
+    if (boardT <= 0) {
+      boardT = 0.14;
+      const rows = gs.players.slice().sort((a, b) => a.itTime - b.itTime || a.id - b.id);
+      const html = '<div class="head">IT TIME (LOW WINS)</div>' + rows.map((p) =>
+        '<div class="row' + (p.id === 0 ? ' me' : '') + '"><span class="sw" style="background:' + hex(p.color) + '"></span>' +
+        '<span class="nm">' + p.name + '</span><span class="itb">' + (p.isIt ? '&#9660;' : '') + '</span>' +
+        '<span class="tm">' + p.itTime.toFixed(1) + 's</span><span class="st">' + (p.score ? '&#9733;' + p.score : '') + '</span></div>').join('');
+      if (html !== lastBoard) { el.board.innerHTML = html; lastBoard = html; }
+    }
+
+    // banner: countdown number, GO!, round winner, match winner
+    let main = '', sub = '', win = false;
+    if (gs.mode === 'countdown') { main = String(Math.max(1, Math.ceil(gs.countdownLeft))); sub = me.isIt ? 'YOU ARE IT' : 'RUN!'; }
+    else if (gs.mode === 'play' && flashGo > 0) main = 'GO!';
+    else if (gs.mode === 'roundend') { main = pname(gs.winner) + ' WINS ROUND ' + gs.round; sub = 'next round in ' + Math.max(1, Math.ceil(gs.roundEndLeft)); win = true; }
+    else if (gs.mode === 'matchend') { main = pname(gs.winner) + ' WINS THE MATCH'; sub = 'press Enter to play again'; win = true; }
+    flashGo = Math.max(0, flashGo - dt);
+    el.banner.style.display = main ? 'block' : 'none';
+    el.banner.className = 'hud' + (win ? ' win' : '');
+    el.bMain.textContent = main; el.bSub.textContent = sub;
+
+    toastT = Math.max(0, toastT - dt);
+    if (toastT <= 0 && el.toast.textContent) el.toast.textContent = '';
+  }
+
+  // ---- render loop: accumulate real time, run whole ticks, then draw ---------------------------------------------------------------
   let acc = 0, last = performance.now();
   function frame(now) {
     const dt = Math.min(0.1, (now - last) / 1000);
@@ -53,19 +314,50 @@ async function boot() {
     while (acc >= STEP && n < MAX_STEPS_PER_FRAME) { tick(); acc -= STEP; n++; }
     if (n >= MAX_STEPS_PER_FRAME) acc = 0;
 
-    const feet = feetPos(ctx);
-    view.puppet.position.set(feet.x, feet.y, feet.z);
-    view.puppet.rotation.y = state.facing;
-    const hSpeed = Math.hypot(state.vx, state.vz);
-    if (hud) hud.textContent = 'spd ' + Math.round(hSpeed / SCALE) + '  runT ' + state.runT.toFixed(2) + ' / ' + RUN.rampT +
-      '  BHOP ' + (state.bhopChain > 0 ? 'x' + state.bhopChain : '-') + (state.bhopTimer > 0 ? ' (window)' : '') +
-      '  DASH ' + (state.dashT > 0 ? 'GO' : state.dashCd > 0 ? state.dashCd.toFixed(1) + 's' : 'ready') +
-      '  AIRJ ' + state.airJumpsLeft +
-      (state.wallRunning ? '  WALLRUN' : state.regrabTimer > 0 ? '  regrab ' + state.regrabTimer.toFixed(2) + 's' : '') +
-      (state.sliding ? '  SLIDE' : '');
-    view.setPuppetHeight(state.height);
-    view.setFocus(feet);
-    updateCamera(rig, view.camera, ctx, feet, dt, m(CAM.pivot) * state.height / m(PUPPET.height), hSpeed, state.wallRunning ? state.wallSide : 0);
+    // puppets: ragdoll parts while ragdolling, otherwise the capsule (squashed to the collider height)
+    for (let i = 0; i < N; i++) {
+      const pu = puppets[i];
+      if (rags[i]) {
+        syncRagdollMeshes(rags[i], pu.parts, torso[i]);
+        pu.showRagdoll(true); pu.showCapsule(false);
+      } else {
+        const f = feetPos(views[i]);
+        pu.setFeet(f.x, f.y, f.z);
+        pu.setHeight(states[i].height);
+        pu.showRagdoll(false); pu.showCapsule(limbo[i] <= 0);
+      }
+    }
+
+    // the red cone over whoever is IT
+    const itIdx = gs.players.findIndex((p) => p.isIt);
+    if (itIdx < 0) view.setItMarker(null);
+    else if (rags[itIdx]) view.setItMarker({ x: torso[itIdx].x, y: torso[itIdx].y + 0.95, z: torso[itIdx].z }, now / 1000);
+    else {
+      const f = feetPos(views[itIdx]);
+      view.setItMarker({ x: f.x, y: f.y + states[itIdx].height + 0.55, z: f.z }, now / 1000);
+    }
+
+    // chase camera: your capsule, or your tumbling torso while you are the one ragdolling
+    const hs = states[0], hv = views[0];
+    const hSpeed = Math.hypot(hs.vx, hs.vz);
+    let focus;
+    if (rags[0]) {
+      focus = torso[0];
+      updateCamera(rig, view.camera, hv, focus, dt, 0.15, 0, 0);
+    } else {
+      focus = feetPos(hv);
+      updateCamera(rig, view.camera, hv, focus, dt, m(CAM.pivot) * hs.height / m(PUPPET.height), hSpeed, hs.wallRunning ? hs.wallSide : 0);
+    }
+    view.setFocus(focus);
+
+    if (el.hud) el.hud.textContent = 'spd ' + Math.round(hSpeed / SCALE) + '  runT ' + hs.runT.toFixed(2) + ' / ' + RUN.rampT +
+      '  BHOP ' + (hs.bhopChain > 0 ? 'x' + hs.bhopChain : '-') + (hs.bhopTimer > 0 ? ' (window)' : '') +
+      '  DASH ' + (hs.dashT > 0 ? 'GO' : hs.dashCd > 0 ? hs.dashCd.toFixed(1) + 's' : 'ready') +
+      '  AIRJ ' + hs.airJumpsLeft +
+      (hs.wallRunning ? '  WALLRUN' : hs.regrabTimer > 0 ? '  regrab ' + hs.regrabTimer.toFixed(2) + 's' : '') +
+      (hs.sliding ? '  SLIDE' : '') + (gs.players[0].stun > 0 ? '  STUN' : '');
+    updateHud(dt);
+
     view.renderer.render(view.scene, view.camera);
     requestAnimationFrame(frame);
   }
