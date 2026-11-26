@@ -6,19 +6,19 @@ The old game stays live in its own repo; this is a separate project.
 ## File map (one line per file; each file's header says what it loads after)
 
 ```
-index.html                 Page shell + match HUD (timer, IT status, IT-time leaderboard, round / match banner), loads src/main.js as a module.
+index.html                 Page shell + match HUD (timer, IT status, IT-time leaderboard, round / match banner), bottom hint bar incl. `[G] Mode: TAG / SANDBOX`, loads src/main.js as a module.
 package.json               Dependencies (three, @dimforge/rapier3d-compat) and vite scripts.
 src/config.js              Every tunable number, in OLD 2.5D units. SCALE converts to metres at the point of use.
 src/game/maps.js           Map data (DISTRICT_MAP "Glitch" parkour arena: boxes with optional floating y0, pillars, holes, ramps, spawns) + shared boxSpan() / floorSlabs() / rampSpan() helpers + validateMap() (Node-runnable data checks).
 src/input.js                Keyboard state and the per-tick input snapshot (wanted direction, jump edge, dash edge, slide held, grapple held (E / right mouse); grab to follow).
 src/game/state.js          Plain-data match state (players, mode, timers, events). No engine deps. Spawns are passed in METRES.
 src/game/rules.js          Tag rules over that state: tag, dash shove, slide trip, soft separation, IT-time scoring, rounds / match end.
-src/physics/player.js      Movement rules as stepPlayer(state, input, ctx): momentum run, jump, double jump, air-strafe, b-hop, crouch-slide, dash, wall-run, wall-kick, grapple / sticky hand; `state.locked` ignores input (stun / freeze); pillar orbit to follow.
+src/physics/player.js      Movement rules as stepPlayer(state, input, ctx): momentum run, jump, double jump, air-strafe, b-hop, crouch-slide (Titanfall 2 style: entry boost, slope acceleration, slide-hop), dash, wall-run, wall-kick, grapple / sticky hand; `state.locked` ignores input (stun / freeze); pillar orbit to follow.
 src/physics/ragdoll.js     On-demand cosmetic 6-part Rapier ragdoll (spawnRagdoll / syncRagdollMeshes / despawnRagdoll), RAGDOLL_RIG dimensions, collision groups.
 src/physics/world.js       Rapier world built from the map (floor slabs, boxes, pillars, ramp wedges, all in WALL_GROUP), one kinematic capsule per player (PLAYER_GROUP) with a shared character controller, rays, detectWall, groundGap, placePlayer / teleportPlayer, nudgePlayer, hasFallen, raycastGrapple (level + player shots).
 src/render/scene.js        Three.js renderer, lights, the District meshes (slabs + rim trims, boxes, pillars, ramps), no background geometry, per-player puppets (faceless capsule + hidden 6-part ragdoll meshes), the red IT cone (setItMarker), setFocus moves the sun, setGrapple draws the grapple tether.
 src/render/camera.js       Mouse-orbit chase camera (PointerLock) with a Rapier raycast boom.
-src/main.js                Boot, 6-player match (1 human + 5 bots, botInput), the glue between player.js / world.js / rules.js, ragdoll on stun / fall, grapple aim + snag stun, crosshair / grapple HUD, fixed 60 Hz tick decoupled from the render loop. Loads LAST.
+src/main.js                Boot, 6-player match (1 human + 5 bots, botInput), the glue between player.js / world.js / rules.js, ragdoll on stun / fall, grapple aim + snag stun, crosshair / grapple HUD, fixed 60 Hz tick decoupled from the render loop, `[G]` / `?sandbox=1` TAG <-> SANDBOX toggle. Loads LAST.
 ```
 
 ## Rules
@@ -71,7 +71,7 @@ src/main.js                Boot, 6-player match (1 human + 5 bots, botInput), th
 - **runT:** `RUN` in `config.js`. Speed goes `min -> max` over `rampT` seconds of clean ground running (x`itBonus` when IT).
   Held in the air (so jumps, slides, dashes and flings keep it), drains at `stopDecay` with no input on the ground and at
   `wallDecay` while pressed against a wall (moved distance < `wallRatio` of the wanted distance).
-- The yellow HUD line (top left) shows live speed in old units and runT, for tuning.
+- The yellow HUD line (top left) shows live speed in old units and runT, for tuning (plus `slideboost ready / cooldown`).
 - **Jump:** `JUMP` in `config.js` (impulse 350, buffer 0.12 s, coyote 0.10 s, gravRise 850, gravFall 1100, airAccel 3).
   Space is latched on key press in `input.js` and consumed by the next tick, so a press is never lost between frames.
   A jump fires when `jumpBuf > 0` and `coyote > 0`; both are zeroed on takeoff, so there is no double jump. Gravity is
@@ -79,12 +79,21 @@ src/main.js                Boot, 6-player match (1 human + 5 bots, botInput), th
   (ground uses `MOVE.accel`); with no keys the air momentum is kept. A ceiling bonk zeroes `vy`.
 - `movePlayer` disables Rapier's snap-to-ground on any upward move, so a jump is never pulled back to the floor.
 - Apex height = `impulse^2 / (2 * gravRise)` = 72 units (one puppet tall). Tune jump height with `impulse` / `gravRise`.
-- **Slide:** `SLIDE` in `config.js` (height 40, entryBoost 1.2, maxEntrySpeed 460, friction 0.55 per second, steerAccel 90,
-  minSpeed 60, resize 14). Shift held on the ground enters a slide; above `minSpeed` the entry speed is multiplied by
-  `entryBoost` but never pushed past `maxEntrySpeed` (a faster entry is kept as is). While sliding, horizontal speed is
-  multiplied by `friction^dt` per tick and held keys steer by `steerAccel` without ever adding speed (steering can still
-  creep up to `minSpeed` from a standstill, so a slide never traps you). `runT` is held, not grown or drained, so the
-  momentum comes back when you stand up. The slide ends on Shift release, on a jump, or when airborne past coyote time.
+- **Slide (Titanfall 2 flow):** `SLIDE` in `config.js` (height 40, friction 0.84, steerAccel 240, boostAdd 115, maxBoostSpeed 680, boostCd 0.75,
+  slopeAccel 650, minSpeed 60, resize 14). The slide is meant to ACCELERATE combos, not brake them:
+  - **Entry boost:** Shift held on the ground enters a slide. If `slideBoostCd <= 0`, `SLIDE.boostAdd` is ADDED to the horizontal speed along the
+    velocity (along the facing when slower than `minSpeed`), but never past `maxBoostSpeed`; a speed already above 680 (b-hop / dash / ramp speed) is
+    kept as is. A boost that fired starts `boostCd` 0.75 s (`state.slideBoostCd`), so tapping Shift from a standstill cannot be spammed. Entering
+    with the cooldown running keeps the speed, no boost.
+  - **Glide + carve:** horizontal speed is multiplied by `friction^dt` (0.84 / s, so a slide carries far) and held keys steer by `steerAccel` (240) without
+    ever adding speed (steering can still creep up to `minSpeed` from a standstill, so a slide never traps you). `runT` is held, not grown or drained.
+  - **Downhill:** after the move, while `sliding && grounded && c.y < -1e-4` (the controller moved the capsule DOWN) `slopeAccel * STEP` is added along the
+    slide direction. A second guard (`-c.y > 2 %` of the horizontal travel) ignores the micro-jitter of the ground stick on flat floors. Equilibrium on the
+    16 degree speed ramps is far above the b-hop cap, so a ramp slide rockets you into a b-hop.
+  - **Slide-hop:** hold Shift and tap Space. A jump / launch clears `sliding` on the same tick (the capsule stands back up in the air), the landing
+    re-enters the slide at once while Shift is still held, and inside the `BHOP.window` that slide has no friction; Space there jumps out with the b-hop bonus
+    and `bhopChain` + 1. A jump press buffered just before touchdown fires on the landing tick (before the slide entry), so nothing is lost.
+  - The slide ends on Shift release, a jump / dash / launch, or when airborne past coyote time.
 - **Capsule resize:** `movePlayer(..., newHeight)` changes the collider half-height and shifts the capsule centre by half
   the change so the FEET stay put; the shape change and the new position reach Rapier in the same world step. Height
   eases at `SLIDE.resize`. Standing up first calls `hasHeadroom(ctx, standingHeight)` (a slightly smaller test capsule
@@ -270,3 +279,19 @@ Top left keeps the movement tuning line. Match settings (first to 3 round wins, 
 
 **Known limits / next:** bots have no pathfinding (they can get boxed in by the wall-run gauntlets, the stuck logic frees them); the ragdoll is not synced to the capsule while it tumbles;
 no title screen or lobby yet (the match starts straight into the countdown); pillar orbit is still not implemented (wall-run covers curving around pillars).
+
+## Sandbox / free-roam practice mode (main.js, index.html)
+
+`[G]` toggles **TAG MATCH (6 Players)** <-> **SANDBOX (Solo Free-Roam)**; `?sandbox=1` starts in the sandbox (the URL is kept in sync with `history.replaceState`).
+The bottom hint bar shows `[G] Mode: TAG / SANDBOX` with the active mode highlighted (`#modeTag` / `#modeSandbox`, updated in `updateHud`).
+
+| | TAG MATCH | SANDBOX |
+|---|---|---|
+| Bots (players 1..5) | simulated | parked far off the map (`PARK_POS`, `limbo = PARK`), not stepped, not rendered, not grapple targets (`skip`) |
+| `stepGameRules` | every tick | not run: no tags, shoves, trips, soft separation, IT time, timer, countdown, round / match end |
+| `gs.mode` / IT | rules own them | forced to `'play'` every tick, every `isIt = false`, `stun = 0` |
+| HUD | round, timer, status, leaderboard, banners | `SANDBOX` / `FREE ROAM`; timer, leaderboard and banners hidden |
+| `R` / falling off | fall = ragdoll + 1.2 s down + IT penalty | `sandboxRespawn()`: instant teleport to your spawn (`spawnsM[0]`), no ragdoll, no limbo, no penalty; all movement state, cooldowns and chains reset (`createPlayerState`), camera faces the middle |
+
+Switching to SANDBOX ends bot ragdolls, parks the capsules and respawns you. Switching back calls `startMatch(gs, spawnsM)` + `placeAll()` (fresh match: scores 0,
+countdown, bots back on their spawns). `state.js`, `rules.js` and the other files are untouched; the sandbox only gates the calls in `main.js`.
