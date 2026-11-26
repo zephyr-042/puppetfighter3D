@@ -3,7 +3,7 @@
 // View only: yaw / pitch are local and never part of the simulation.
 // Loads after: config.js, physics/world.js (raycastStatic)
 
-import { m, CAM } from '../config.js';
+import { m, CAM, SCALE } from '../config.js';
 import { raycastStatic } from '../physics/world.js';
 
 export function createCameraRig(domElement) {
@@ -32,7 +32,8 @@ export function forwardOf(rig) {
 
 // Place the Three camera: orbit around the pivot (chest height above the feet), pulled in by the boom ray.
 // `pivot` (metres above the feet) drops while sliding so the view sits low to the ground.
-export function updateCamera(rig, camera, ctx, feet, dt, pivot = m(CAM.pivot)) {
+// `speed` (metres / s, horizontal) widens the FOV by up to CAM.fovWarp degrees between fovWarpFrom and fovWarpTo (old units / s).
+export function updateCamera(rig, camera, ctx, feet, dt, pivot = m(CAM.pivot), speed = 0) {
   const px = feet.x, py = feet.y + pivot, pz = feet.z;
   // unit vector from the pivot to the wanted camera position
   const cp = Math.cos(rig.pitch), sp = Math.sin(rig.pitch);
@@ -48,4 +49,12 @@ export function updateCamera(rig, camera, ctx, feet, dt, pivot = m(CAM.pivot)) {
 
   camera.position.set(px + bx * rig.dist, py + by * rig.dist, pz + bz * rig.dist);
   camera.lookAt(px, py, pz);
+
+  // speed FOV warp: eased so a dash or a landing does not snap the view
+  const t = Math.max(0, Math.min(1, (speed / SCALE - CAM.fovWarpFrom) / (CAM.fovWarpTo - CAM.fovWarpFrom)));
+  const wantFov = CAM.fov + CAM.fovWarp * t;
+  if (Math.abs(wantFov - camera.fov) > 0.01) {
+    camera.fov += (wantFov - camera.fov) * Math.min(1, dt * CAM.fovWarpEase);
+    camera.updateProjectionMatrix();
+  }
 }
