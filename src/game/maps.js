@@ -1,7 +1,7 @@
 /* ============================================================================
    src/game/maps.js
-   puppetfighter3D: map data. ALL numbers are original 2.5D units (SCALE = 0.025 is
-   applied later by world.js / scene.js). x: west -> east, z: north (-) -> south (+),
+   puppetfighter3D: map data (plus the shared floorSlabs / rampSpan helpers at the bottom).
+   ALL numbers are original 2.5D units (SCALE = 0.025 is applied later by world.js / scene.js). x: west -> east, z: north (-) -> south (+),
    y: height above the floor (0 = floor).
 
    Conventions
@@ -127,5 +127,54 @@ export var DISTRICT_MAP = {
     { x: 295, z: 380, hw: 125, hd: 50, y0: 0, y1: 95, dir: '+x' }
   ]
 };
+
+/* ----------------------------------------------------------------------------
+   Shared geometry helpers. world.js (colliders) and scene.js (meshes) BOTH build from these, so what you see
+   is always what you collide with. Everything here is still in old 2.5D units.
+   ---------------------------------------------------------------------------- */
+
+// The rooftop floor = the rect minus the skylight holes, as non-overlapping { x, z, hw, hd } slabs (top face at y = 0).
+// Sweep: cut the rect into vertical strips at every hole's west / east edge; inside a strip each hole either spans the whole
+// strip or misses it, so the strip is just cut at the spans of the holes that cover it.
+export function floorSlabs(map) {
+  var hw = map.rect.hw, hd = map.rect.hd, holes = map.holes || [], EPS = 1e-6;
+  var xs = [-hw, hw];
+  holes.forEach(function (h) { xs.push(h.x - h.hw, h.x + h.hw); });
+  xs.sort(function (a, b) { return a - b; });
+  function slab(xa, xb, za, zb) { return { x: (xa + xb) / 2, z: (za + zb) / 2, hw: (xb - xa) / 2, hd: (zb - za) / 2 }; }
+  var out = [];
+  for (var i = 0; i < xs.length - 1; i++) {
+    var xa = xs[i], xb = xs[i + 1];
+    if (xb - xa < EPS) continue;
+    var cover = holes.filter(function (h) { return h.x - h.hw <= xa + EPS && h.x + h.hw >= xb - EPS; })
+                     .sort(function (a, b) { return a.z - b.z; });
+    var z = -hd;
+    cover.forEach(function (h) {
+      var za = h.z - h.hd, zb = h.z + h.hd;
+      if (za - z > EPS) out.push(slab(xa, xb, z, za));
+      z = Math.max(z, zb);
+    });
+    if (hd - z > EPS) out.push(slab(xa, xb, z, hd));
+  }
+  return out;
+}
+
+// A ramp as a SOLID wedge. Height is linear along the ascent axis: y0 at the low edge, y1 at the high edge.
+// Returns { alongX, sign, lo, hi, across, w, y0, y1, cx, cz, len, wid, rotY }:
+//   lo / hi = world coordinate of the low / high edge along the ascent axis, across = centre coordinate on the other axis,
+//   w = half width across, len / wid = full length / width, rotY = Three.js Y rotation that turns local +x into the ascent direction.
+export function rampSpan(r) {
+  var alongX = r.dir === '+x' || r.dir === '-x';
+  var sign = r.dir.charAt(0) === '+' ? 1 : -1;
+  var half = alongX ? r.hw : r.hd, centre = alongX ? r.x : r.z;
+  return {
+    alongX: alongX, sign: sign,
+    lo: centre - sign * half, hi: centre + sign * half,
+    across: alongX ? r.z : r.x, w: alongX ? r.hd : r.hw,
+    y0: r.y0, y1: r.y1, cx: r.x, cz: r.z,
+    len: half * 2, wid: (alongX ? r.hd : r.hw) * 2,
+    rotY: { '+x': 0, '-x': Math.PI, '+z': -Math.PI / 2, '-z': Math.PI / 2 }[r.dir]
+  };
+}
 
 export default DISTRICT_MAP;
