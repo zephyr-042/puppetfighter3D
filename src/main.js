@@ -1,6 +1,7 @@
 // src/main.js
 // MAIN: boots the world + scene, runs the 6-player tag match (1 human + 5 bots), the fixed 60 Hz step decoupled from rendering,
 // the on-demand cosmetic ragdolls, the grapple aim / snag glue and the match HUD (plus a JS-built crosshair). Loads LAST.
+// [G] (or ?sandbox=1) toggles TAG MATCH <-> SANDBOX: solo free-roam, bots parked, no tag rules / timer / rounds, R = instant respawn.
 // Movement rules live in physics/player.js, tag rules in game/rules.js, keyboard in input.js; this file is the wiring.
 //
 // One tick (STEP = 1/60):
@@ -62,6 +63,9 @@ async function boot() {
   resetRoundPlayers(gs, spawnsM);
   gs.round = 1; gs.mode = 'countdown'; gs.countdownLeft = gs.countdownTime;   // same as startMatch()
   let lastRound = gs.round;
+  let sandbox = false;                         // SANDBOX (solo free-roam practice) vs TAG MATCH
+  const PARK = 1e9;                            // limbo value for parked bots: they never come back until the mode switches
+  const PARK_POS = { x: 5000, y: 200, z: 5000 };   // far off the map (never moved, never rendered, never a grapple target)
 
   const N = gs.players.length;
   const views = [], states = [], puppets = [], brains = [];
@@ -108,10 +112,46 @@ async function boot() {
 
   window.addEventListener('keydown', (e) => {
     if (e.repeat) return;
+    if (e.code === 'KeyG') setSandbox(!sandbox);                        // TAG MATCH <-> SANDBOX
     if (e.code === 'KeyR') forceFall[0] = true;                         // "I am stuck": handled exactly like a fall
     if (e.code === 'Enter' && gs.mode === 'matchend') wantRestart = true;
   });
   let wantRestart = false;
+
+  // ---- sandbox / free-roam ---------------------------------------------------------------------------------------------------
+  // SANDBOX: the 5 bots are parked off the map (limbo = PARK, never stepped), stepGameRules is not run at all (no tags, timer,
+  // countdown or round-end), gs.mode stays 'play' and nobody is IT. R / falling = instant teleport to your spawn, no ragdoll, no penalty.
+  function sandboxRespawn() {
+    const sp = spawnsM[0];
+    killRagdoll(0);
+    placePlayer(views[0], sp.x, sp.y || 0, sp.z, false);
+    states[0] = createPlayerState();                      // momentum, cooldowns, chains, grapple: all fresh for the next line
+    limbo[0] = 0; forceFall[0] = false;
+    faceCenter(0);
+  }
+  function setSandbox(on) {
+    if (on === sandbox) return;
+    sandbox = on;
+    if (on) {
+      for (let i = 1; i < N; i++) {
+        killRagdoll(i); states[i] = createPlayerState();
+        placePlayer(views[i], PARK_POS.x, PARK_POS.y, PARK_POS.z, false);
+        limbo[i] = PARK; forceFall[i] = false;
+      }
+      gs.mode = 'play'; gs.players.forEach((p) => { p.isIt = false; p.stun = 0; });
+      sandboxRespawn();
+      stepWorld(ctx);
+    } else {
+      limbo.fill(0);
+      startMatch(gs, spawnsM); lastRound = gs.round; placeAll();   // fresh match: bots back, scores 0, countdown
+    }
+    try {                                                  // keep ?sandbox=1 in the URL in sync (reload keeps the mode)
+      const u = new URL(location.href);
+      if (on) u.searchParams.set('sandbox', '1'); else u.searchParams.delete('sandbox');
+      history.replaceState(null, '', u);
+    } catch (e) { /* ignore */ }
+    if (el.toast) { el.toast.textContent = on ? 'SANDBOX: solo free-roam, R = instant respawn' : 'TAG MATCH: 6 players'; toastT = 1.8; }
+  }
 
   // ---- bots ----------------------------------------------------------------------------------------------------------------
   // Lightweight steering, no pathfinding. IT bot: run at the nearest runner (leading its movement a little), hop now and then,
@@ -207,8 +247,14 @@ async function boot() {
       startMatch(gs, spawnsM); lastRound = gs.round; placeAll();
     }
 
+    if (sandbox) {                                        // free-roam: always 'play', nobody IT or stunned
+      gs.mode = 'play';
+      for (const q of gs.players) { q.isIt = false; q.stun = 0; }
+    }
+
     // 1. input + movement for every capsule
     for (let i = 0; i < N; i++) {
+      if (sandbox && i > 0) continue;                     // parked bots are not simulated
       const p = gs.players[i], s = states[i];
       if (limbo[i] > 0) { limbo[i] -= STEP; if (limbo[i] <= 0) { limbo[i] = 0; killRagdoll(i); } }
       s.isIt = p.isIt;
@@ -231,7 +277,8 @@ async function boot() {
     for (let i = 0; i < N; i++) {
       const p = gs.players[i], s = states[i], v = views[i];
       let fell = false;
-      if (limbo[i] <= 0 && (hasFallen(v) || forceFall[i])) {
+      if (sandbox && i === 0 && (hasFallen(v) || forceFall[0])) sandboxRespawn();   // R / void: instant, no ragdoll, no fall penalty
+      if (!sandbox && limbo[i] <= 0 && (hasFallen(v) || forceFall[i])) {
         fell = true; forceFall[i] = false;
         // ragdoll tumbles where the player fell; the capsule is parked on its spawn point and stays hidden while "down"
         const f = feetPos(v);
@@ -256,7 +303,7 @@ async function boot() {
     }
 
     // 4. tag rules (tags, shoves, trips, soft separation, IT time, rounds)
-    stepGameRules(gs, STEP);
+    if (!sandbox) stepGameRules(gs, STEP);                // (sandbox: no tags, shoves, trips, separation, timer, rounds)
 
     // 5. game state -> capsules
     if (gs.round !== lastRound) {                          // rules started a new round: everybody back on a spawn
@@ -295,7 +342,8 @@ async function boot() {
 
   // ---- HUD ----------------------------------------------------------------------------------------------------------------------
   const el = { hud: $('hud'), round: $('round'), timer: $('timer'), status: $('status'), board: $('board'),
-               banner: $('banner'), bMain: $('bannerMain'), bSub: $('bannerSub'), toast: $('toast') };
+               banner: $('banner'), bMain: $('bannerMain'), bSub: $('bannerSub'), toast: $('toast'),
+               mTag: $('modeTag'), mSand: $('modeSandbox') };
   const hex = (c) => '#' + c.toString(16).padStart(6, '0');
   const fmt = (t) => { t = Math.max(0, Math.ceil(t)); return Math.floor(t / 60) + ':' + String(t % 60).padStart(2, '0'); };
   const pname = (id) => (gs.players[id] ? gs.players[id].name : '?');
@@ -314,6 +362,16 @@ async function boot() {
   function updateHud(dt) {
     const me = gs.players[0];
     handleEvents();
+    if (el.mTag) { el.mTag.className = sandbox ? '' : 'on'; el.mSand.className = sandbox ? 'on' : ''; }
+    if (sandbox) {                                        // free-roam: no round / timer / IT status / leaderboard / banners
+      el.round.textContent = 'SANDBOX'; el.timer.textContent = ''; el.timer.className = '';
+      el.status.textContent = 'FREE ROAM'; el.status.className = 'run';
+      el.board.style.display = 'none'; el.banner.style.display = 'none';
+      toastT = Math.max(0, toastT - dt);
+      if (toastT <= 0 && el.toast.textContent) el.toast.textContent = '';
+      return;
+    }
+    el.board.style.display = '';
     el.round.textContent = 'ROUND ' + gs.round;
     const tl = gs.mode === 'play' ? gs.timeLeft : gs.mode === 'countdown' ? gs.roundTime : 0;
     el.timer.textContent = fmt(tl);
@@ -407,7 +465,7 @@ async function boot() {
       '  AIRJ ' + hs.airJumpsLeft +
       '  GRAPPLE ' + (hs.grappleActive ? 'GO' : hs.grappleCd > 0 ? hs.grappleCd.toFixed(1) + 's' : 'ready') +
       (hs.wallRunning ? '  WALLRUN' : hs.regrabTimer > 0 ? '  regrab ' + hs.regrabTimer.toFixed(2) + 's' : '') +
-      (hs.sliding ? '  SLIDE' : '') + (gs.players[0].stun > 0 ? '  STUN' : '');
+      (hs.sliding ? '  SLIDE' : '') + (hs.slideBoostCd > 0 ? '  slideboost ' + hs.slideBoostCd.toFixed(2) + 's' : '  slideboost ready') + (gs.players[0].stun > 0 ? '  STUN' : '');
     updateHud(dt);
 
     const gtxt = hs.grappleActive ? 'HOOKED' : hs.grappleCd > 0 ? 'GRAPPLE ' + hs.grappleCd.toFixed(1) + 's' : 'GRAPPLE READY';
@@ -419,6 +477,7 @@ async function boot() {
     view.renderer.render(view.scene, view.camera);
     requestAnimationFrame(frame);
   }
+  if (new URLSearchParams(location.search).get('sandbox') === '1') setSandbox(true);   // ?sandbox=1: start in free-roam
   requestAnimationFrame(frame);
 }
 
