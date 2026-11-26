@@ -41,9 +41,11 @@ async function boot() {
     if (hud) hud.textContent = 'spd ' + Math.round(hSpeed / SCALE) + '  runT ' + state.runT.toFixed(2) + ' / ' + RUN.rampT +
       '  BHOP ' + (state.bhopChain > 0 ? 'x' + state.bhopChain : '-') + (state.bhopTimer > 0 ? ' (window)' : '') +
       '  DASH ' + (state.dashT > 0 ? 'GO' : state.dashCd > 0 ? state.dashCd.toFixed(1) + 's' : 'ready') +
+      '  AIRJ ' + state.airJumpsLeft +
+      (state.wallRunning ? '  WALLRUN' : state.regrabTimer > 0 ? '  regrab ' + state.regrabTimer.toFixed(2) + 's' : '') +
       (state.sliding ? '  SLIDE' : '');
     view.setPuppetHeight(state.height);
-    updateCamera(rig, view.camera, ctx, feet, dt, m(CAM.pivot) * state.height / m(PUPPET.height), hSpeed);
+    updateCamera(rig, view.camera, ctx, feet, dt, m(CAM.pivot) * state.height / m(PUPPET.height), hSpeed, state.wallRunning ? state.wallSide : 0);
     view.renderer.render(view.scene, view.camera);
     requestAnimationFrame(frame);
   }
