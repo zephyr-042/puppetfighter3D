@@ -9,9 +9,9 @@ The old game stays live in its own repo; this is a separate project.
 index.html                 Page shell, loads src/main.js as a module.
 package.json               Dependencies (three, @dimforge/rapier3d-compat) and vite scripts.
 src/config.js              Every tunable number, in OLD 2.5D units. SCALE converts to metres at the point of use.
-src/input.js                Keyboard state and the per-tick input snapshot (wanted direction, jump edge, slide held; dash / grab to follow).
-src/physics/player.js      Movement rules as stepPlayer(state, input, ctx): momentum run, jump, crouch-slide now; dash, pillar orbit to follow.
-src/physics/world.js       Rapier world, static test floor + blocks, kinematic capsule + character controller, static raycast.
+src/input.js                Keyboard state and the per-tick input snapshot (wanted direction, jump edge, dash edge, slide held; grab to follow).
+src/physics/player.js      Movement rules as stepPlayer(state, input, ctx): momentum run, jump, double jump, air-strafe, b-hop, crouch-slide, dash, wall-run, wall-kick; pillar orbit to follow.
+src/physics/world.js       Rapier world, static test floor + blocks (WALL_GROUP), kinematic capsule + character controller, static raycast, detectWall, groundGap.
 src/render/scene.js        Three.js renderer, lights, floor / blocks meshes, placeholder capsule puppet (setPuppetHeight squashes it).
 src/render/camera.js       Mouse-orbit chase camera (PointerLock) with a Rapier raycast boom.
 src/main.js                Boot, fixed 60 Hz tick decoupled from the render loop. Loads LAST.
@@ -52,9 +52,14 @@ src/main.js                Boot, fixed 60 Hz tick decoupled from the render loop
 | Progressive momentum run (`runT`) | done |
 | Jump (buffer, coyote time, heavier fall) | done |
 | Crouch-slide (+ capsule squash, low camera) | done |
-| Dash | |
+| Solid test blocks (one Rapier cuboid per `TEST_BLOCKS` entry) | done |
+| Quake-style air-strafe + b-hop (no speed cap) | done |
+| Dash (F) | done |
+| Speed FOV warp | done |
+| Double jump | done |
+| Wall-run + wall-kick (+ camera roll) | done |
 | Orbital pillar grab | |
-| Speed FOV warp, squash + tether visuals | |
+| Squash + tether visuals | |
 
 - `src/physics/player.js` holds `stepPlayer(state, input, ctx)`. State speeds are in metres / s; config numbers stay in old units.
 - **runT:** `RUN` in `config.js`. Speed goes `min -> max` over `rampT` seconds of clean ground running (x`itBonus` when IT).
@@ -78,5 +83,40 @@ src/main.js                Boot, fixed 60 Hz tick decoupled from the render loop
   the change so the FEET stay put; the shape change and the new position reach Rapier in the same world step. Height
   eases at `SLIDE.resize`. Standing up first calls `hasHeadroom(ctx, standingHeight)` (a slightly smaller test capsule
   against static geometry); under a low ceiling the puppet stays crouched until there is room.
+- **Run cap:** `RUN` is now `min 210 -> max 310` over `rampT 1.0 s`. Holding W only ever reaches 310; every higher speed is earned
+  with air-strafing, b-hops or the dash. Speed above the cap on the ground bleeds back toward it (velocity chases the wanted velocity).
+- **Air-strafe (`airAccelerate` in player.js):** Quake / Source style. No horizontal drag in the air. Each tick the wish direction adds
+  `min(airWishCap - speedAlongWish, airAccel * runSpeed * dt)` (only when positive). Flying straight adds nothing; a wish direction
+  sideways to the velocity, followed by turning the camera, keeps adding speed with no upper limit. Tune the gain with `JUMP.airWishCap`
+  (bigger = faster gain) and `JUMP.airAccel`.
+- **B-hop (`BHOP` in config.js):** a landing (needs `minAir` 0.05 s in the air, which filters Rapier's one-tick grounded flicker on flat
+  ground) opens a `window` of 0.14 s with no friction and no run-speed clamp (slides keep their speed too). Jumping inside the window
+  (jump buffer counts) adds `bonus` 25 units / s along the wish direction (ceiling `maxSpeed` 850 for the BONUS only, a faster speed is
+  never reduced) and increments `bhopChain`. Letting the window expire, or hitting a wall, resets the chain and speed bleeds to the run cap.
+  Blocked horizontal motion (walls) also removes the blocked speed, so uncapped air speed cannot pile up against a wall.
+- **Dash (`DASH`, key F):** `input.js` latches F like Space. The dash locks the held direction (or facing) for `duration` 0.2 s at
+  `max(speed, current speed)`, with light gravity (`airGrav`), keeps `runT`, cancels a slide, and has a 1.3 s `cooldown`. A jump cancels
+  the lock but keeps the speed, so dash -> jump -> b-hop chains work.
+- **Double jump (`JUMP.doubleJumpImpulse / maxAirJumps / doubleJumpDir`):** `airJumpsLeft` is refilled whenever grounded and whenever a
+  wall is caught. A Space press in the air AFTER coyote time spends one: `vy = 320`, plus a 70 units / s push toward the held keys;
+  if that would lower the horizontal speed it is scaled back up, and the air-strafe step is skipped on that tick, so a snap-turn
+  never brakes. A press made while the ground is less than `JUMP.buffer` seconds away (falling) is NOT an air jump: it stays in the
+  buffer and becomes the landing b-hop (`landingSoon` / `groundGap`). This keeps b-hop chains intact.
+- **Wall-run (`WALLRUN`, `detectWall` in world.js):** `detectWall(ctx, yaw)` casts a horizontal ray to each side at `feet + WALLRUN.torso`
+  (reach = radius + `detectDist`) against `WALL_GROUP` colliders only (the floor and every block are members; the player is not).
+  `yaw` is the travel direction, forward = (sin, cos). A wall is caught when ALL hold: in the air for at least `minAir`, W held (`input.fwd`),
+  horizontal speed above `minSpeed`, not dashing, at least `minTangent` of the speed runs along the wall (head-on hits do not stick), and it
+  is not the wall just kicked off while `regrabTimer > 0`. While caught: velocity is aimed along the wall tangent at `max(speed, holdSpeed)`
+  (b-hop speed kept) with a small `stick` push into the wall, gravity is `wallGrav`, fall speed is clamped to `maxFall`, the air jump is
+  refilled, and sliding / air-strafe are off. Releasing W, running out of wall, landing or dashing ends it.
+- **Wall-kick:** Space while wall-running: `vy = kickUp`, velocity = tangent * (speed + `kickFwd`) + normal * `kickOut`, `regrabTimer = regrabCd`
+  (0.25 s) and `lastWallN` = that wall, so the same wall cannot be caught again straight away; chain to a different wall instead. The b-hop
+  chain count is left alone, and normal air-strafing continues from the next tick.
+- **Camera roll:** `updateCamera(..., wallSide)` eases `rig.roll` to `wallSide * camTilt` and applies it with `camera.rotateZ` after `lookAt`
+  (leans away from the wall). HUD shows `AIRJ n`, `WALLRUN`, and `regrab` seconds.
+- **Test arena:** two tall walls (220 high, 170 apart, 440 long, around x = 450 / 620) were added to `TEST_BLOCKS` for wall-running. The older
+  blocks (24-90 high) are lower than the wall ray at the top of a jump, so they only catch the very start / end of a jump.
+- **Speed FOV (`CAM.fovWarp*`):** `updateCamera(..., speed)` eases the FOV up to +15 degrees between 300 and 750 units / s.
+- **HUD:** `spd`, `runT`, `BHOP` (chain count, `(window)` while open), `DASH` (ready / GO / cooldown seconds), `SLIDE`.
 - **Visuals:** `state.height` drives the mesh squash (`setPuppetHeight`) and the camera pivot (scaled by height / standing
   height), so the view drops smoothly with the body.
