@@ -95,6 +95,8 @@ export const SLIDE = {
 export const MOVE = {
   accel: 9,            // how fast velocity chases the wanted velocity (old: k = dt * 9)
   stepHeight: 24,      // max step-up, old units
+  stick: 8,            // old units: while grounded, ask for this much extra downward move each tick so the puppet stays glued to
+                       // a surface that falls away (ramp crests, small drops). Same distance as the controller's snap-to-ground.
 };
 
 // ---- camera (old units where it makes sense)
@@ -114,21 +116,9 @@ export const CAM = {
   fovWarpEase: 6,      // 1 / s: how fast the FOV follows
 };
 
-// ---- test floor (old units)
-export const TEST_FLOOR = {
-  hw: 760,             // half width  (same as the Roof map)
-  hd: 500,             // half depth
-  thickness: 20,
+// ---- map (the map data itself lives in game/maps.js; these are the map-wide settings, old units)
+export const MAP = {
+  floorThickness: 20,  // depth of the rooftop floor slabs below y = 0 (0.5 m)
+  fallY: -480,         // old units (-12 m): the feet below this = fell off the roof / through a skylight -> respawn
+  spawn: 0,            // default index into the map's spawns list (override with ?spawn=N in the page URL)
 };
-
-// ---- test obstacles (old units)
-export const TEST_BLOCKS = [
-  { x: 0, z: -180, hw: 120, hd: 40, h: 60, c: 0x80584a },
-  { x: -240, z: 60, hw: 50, hd: 50, h: 24, c: 0x947048 },
-  { x: -340, z: 60, hw: 50, hd: 50, h: 48, c: 0x707882 },
-  { x: 240, z: 120, hw: 70, hd: 70, h: 90, c: 0x626a76 },
-  // wall-run corridor: two tall parallel walls 170 apart (centre to centre), 440 long, 220 high.
-  // The wall ray sits 36 above the feet, so wall-running needs walls taller than the jump arc (the blocks above are too low).
-  { x: 450, z: -250, hw: 12, hd: 220, h: 220, c: 0x5b6b7c },
-  { x: 620, z: -250, hw: 12, hd: 220, h: 220, c: 0x6b5b7c },
-];
