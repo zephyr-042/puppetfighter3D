@@ -1,133 +1,219 @@
-// src/physics/world.js
-// PHYSICS: the Rapier world, the static test floor and the kinematic capsule controller.
-// Gameplay movement is a kinematic capsule driven by our own velocity; Rapier only resolves collisions.
-// Loads after: config.js
+// src/physics/player.js
+// PHYSICS: the player's movement rules as a function of (state, input). Ported verb by verb from the old physics.js.
+// Done so far: progressive momentum run (runT, plain run capped at RUN.max), jump (buffer, coyote time, rise / fall gravity),
+// Quake-style air-strafing (no air drag, no top speed), b-hop landing window, crouch-slide, dash burst, double jump,
+// wall-run + wall-kick. Coming next: pillar orbit.
+// Loads after: config.js, physics/world.js
+// Speeds in `state` are in METRES / s (already scaled); config numbers are in old units and go through m().
 
-import RAPIER from '@dimforge/rapier3d-compat';
-import { SCALE, STEP, m, PUPPET, MOVE, WALLRUN, TEST_FLOOR, TEST_BLOCKS } from '../config.js';
+import { STEP, m, PUPPET, RUN, MOVE, JUMP, BHOP, DASH, SLIDE, WALLRUN } from '../config.js';
+import { movePlayer, hasHeadroom, detectWall, groundGap } from './world.js';
 
-export const WALL_GROUP = 0x0001;    // collision group of static level geometry (wall / ground rays only look at this group)
-const STATIC_GROUPS = (WALL_GROUP << 16) | 0xFFFF;       // member of WALL_GROUP, collides with everything
-const WALL_RAY_GROUPS = (0xFFFF << 16) | WALL_GROUP;     // a ray that only sees WALL_GROUP members
+export function createPlayerState() {
+  return { vx: 0, vz: 0, vy: 0, facing: 0, runT: 0, isIt: false, wallHit: false, jumpBuf: 0, coyote: 0,
+           sliding: false, height: m(PUPPET.height),
+           wasGrounded: true, airT: 0, bhopTimer: 0, bhopChain: 0,
+           dashT: 0, dashCd: 0, dashX: 0, dashZ: 1, dashSpeed: 0,
+           airJumpsLeft: JUMP.maxAirJumps,
+           wallRunning: false, wallSide: 0, wallN: { x: 0, z: 0 }, wallT: { x: 0, z: 0 },
+           regrabTimer: 0, lastWallN: null };
+}
 
-export async function createWorld() {
-  await RAPIER.init();
-  const world = new RAPIER.World({ x: 0, y: 0, z: 0 });   // gravity is applied by our own movement code
-  world.timestep = STEP;
+// ground top speed for the current momentum (old units -> metres). This is the PLAIN run speed; b-hop / air speed can exceed it.
+export function runSpeed(s) {
+  const f = Math.min(1, s.runT / RUN.rampT);
+  return m(RUN.min + (RUN.max - RUN.min) * f) * (s.isIt ? RUN.itBonus : 1);
+}
 
-  // ---- static test floor: a thick box whose top face sits at y = 0
-  const hw = m(TEST_FLOOR.hw), hd = m(TEST_FLOOR.hd), th = m(TEST_FLOOR.thickness) / 2;
-  const floorBody = world.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(0, -th, 0));
-  world.createCollider(RAPIER.ColliderDesc.cuboid(hw, th, hd).setCollisionGroups(STATIC_GROUPS), floorBody);
+// runT bookkeeping. Grows only on clean ground running; held in the air (so jumps / slides / dashes keep it);
+// drains fast when the player lets go of the keys or runs into something.
+function updateRunT(s, inp, grounded) {
+  if (s.wallHit) s.runT -= STEP * RUN.wallDecay;
+  else if (s.sliding) { /* a slide holds the momentum: no growth, no decay */ }
+  else if (inp.moving) { if (grounded) s.runT += STEP; }
+  else if (grounded) s.runT -= STEP * RUN.stopDecay;
+  s.runT = Math.max(0, Math.min(RUN.rampT, s.runT));
+}
 
-  // ---- static test blocks: one cuboid per TEST_BLOCKS entry, same centre and half-extents as the meshes in render/scene.js
-  // (x, z = centre, hw / hd = half width / depth, h = height; the bottom sits on the floor at y = 0)
-  for (const b of TEST_BLOCKS) {
-    const bh = m(b.h) / 2;
-    const bb = world.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(m(b.x), bh, m(b.z)));
-    world.createCollider(RAPIER.ColliderDesc.cuboid(m(b.hw), bh, m(b.hd)).setCollisionGroups(STATIC_GROUPS), bb);
+// Quake / Source air acceleration. (ax, az) = unit wish direction. Speed is added only while the speed ALONG the wish
+// direction is below the (small) wish cap, so a wish direction that is sideways to the velocity keeps adding speed as the
+// velocity turns; flying straight along it adds nothing. There is no upper limit on the resulting speed.
+function airAccelerate(s, ax, az, wishSpeed) {
+  const add = Math.min(wishSpeed, m(JUMP.airWishCap)) - (s.vx * ax + s.vz * az);
+  if (add <= 0) return;
+  const a = Math.min(add, JUMP.airAccel * wishSpeed * STEP);
+  s.vx += ax * a; s.vz += az * a;
+}
+
+// Is the ground close enough that a jump press now should wait in the buffer for the landing (a b-hop) instead of
+// spending the air jump? True when we are falling and will touch down within JUMP.buffer seconds.
+function landingSoon(ctx, s) {
+  if (s.vy >= 0) return false;
+  return groundGap(ctx, -s.vy * JUMP.buffer) < Infinity;
+}
+
+// One fixed tick. `ctx` is the physics world (movePlayer moves the capsule and reports the result).
+export function stepPlayer(s, inp, ctx) {
+  const grounded = ctx.player.grounded;
+  // A landing needs a real stretch in the air. Rapier's grounded flag can drop for a single tick while running on flat
+  // ground (the resting push into the floor is smaller than the controller's skin), and that must not open a b-hop window.
+  const landed = grounded && !s.wasGrounded && s.airT >= BHOP.minAir;
+  s.airT = grounded ? 0 : s.airT + STEP;
+  s.wasGrounded = grounded;
+  updateRunT(s, inp, grounded);
+
+  // ---- b-hop window: landing opens it; it runs down while we stand; letting it expire ends the chain
+  if (landed) s.bhopTimer = BHOP.window;
+  else if (grounded && s.bhopTimer > 0) {
+    s.bhopTimer -= STEP;
+    if (s.bhopTimer <= 0) { s.bhopTimer = 0; s.bhopChain = 0; }
   }
 
-  // ---- the puppet: kinematic capsule. cylinder half-height + radius = total height
-  const radius = m(PUPPET.radius);
-  const halfCyl = (m(PUPPET.height) - 2 * radius) / 2;
-  const body = world.createRigidBody(
-    RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(0, halfCyl + radius + 0.01, 0)
-  );
-  const collider = world.createCollider(RAPIER.ColliderDesc.capsule(halfCyl, radius), body);
+  // ---- timers
+  if (s.dashCd > 0) s.dashCd = Math.max(0, s.dashCd - STEP);
+  if (s.dashT > 0) s.dashT = Math.max(0, s.dashT - STEP);
+  if (s.regrabTimer > 0) s.regrabTimer = Math.max(0, s.regrabTimer - STEP);
+  if (grounded) s.airJumpsLeft = JUMP.maxAirJumps;
 
-  const controller = world.createCharacterController(0.01);
-  controller.setUp({ x: 0, y: 1, z: 0 });
-  controller.enableAutostep(m(MOVE.stepHeight), radius * 0.5, false);
-  controller.enableSnapToGround(m(8));
-  controller.setMaxSlopeClimbAngle(Math.PI * 0.3);
-  controller.setSlideEnabled(true);
-
-  const player = { body, collider, controller, halfCyl, radius, height: m(PUPPET.height), vy: 0, grounded: false };
-  return { RAPIER, world, player };
-}
-
-// Move the capsule by a desired displacement (metres) and report where it ended up.
-// newHeight (optional, metres): resize the capsule to this total height with the FEET staying put. The resize is queued
-// together with the move, so the shape and the new position reach the query structures in the same world step.
-export function movePlayer(ctx, dx, dy, dz, newHeight) {
-  const { player } = ctx;
-  if (dy > 0) player.controller.disableSnapToGround();      // never glue a jump back to the floor
-  else player.controller.enableSnapToGround(m(8));
-  player.controller.computeColliderMovement(player.collider, { x: dx, y: dy, z: dz });
-  const c = player.controller.computedMovement();
-  player.grounded = player.controller.computedGrounded();
-  const t = player.body.translation();
-  let ny = t.y + c.y;
-  if (newHeight !== undefined && Math.abs(newHeight - player.height) > 1e-6) {
-    const hc = Math.max(0.01, (newHeight - 2 * player.radius) / 2);
-    ny += (hc - player.halfCyl);                            // capsule centre moves by half the height change
-    player.collider.setHalfHeight(hc);
-    player.halfCyl = hc; player.height = newHeight;
+  // ---- wall-run detection: in the air, holding W, fast enough, with a wall beside us that is not the one we just kicked off
+  s.wallRunning = false;
+  const hs = Math.hypot(s.vx, s.vz);
+  if (!grounded && inp.fwd && s.dashT <= 0 && s.airT >= WALLRUN.minAir && hs > m(WALLRUN.minSpeed)) {
+    const w = detectWall(ctx, Math.atan2(s.vx, s.vz));
+    const sameWall = s.regrabTimer > 0 && s.lastWallN && (w.hit && w.normal.x * s.lastWallN.x + w.normal.z * s.lastWallN.z > 0.9);
+    if (w.hit && !sameWall) {
+      let tx = -w.normal.z, tz = w.normal.x;                  // wall tangent, signed to point the way we are travelling
+      if (s.vx * tx + s.vz * tz < 0) { tx = -tx; tz = -tz; }
+      if (Math.abs(s.vx * tx + s.vz * tz) / hs >= WALLRUN.minTangent) {
+        s.wallRunning = true; s.wallSide = w.side; s.wallN = w.normal; s.wallT = { x: tx, z: tz };
+        s.airJumpsLeft = JUMP.maxAirJumps;                    // catching a wall refills the air jump
+      }
+    }
   }
-  player.body.setNextKinematicTranslation({ x: t.x + c.x, y: ny, z: t.z + c.z });
-  return c;
-}
 
-// Is there room to stand at total height h right now? (static geometry only; the player's own collider is ignored.)
-// The test capsule is a touch smaller than the real one so floors and walls we are merely resting against do not count.
-export function hasHeadroom(ctx, h) {
-  const { RAPIER, world, player } = ctx, t = player.body.translation();
-  const feetY = t.y - player.halfCyl - player.radius;
-  const r = player.radius * 0.9, hc = Math.max(0.01, (h - 2 * r) / 2 - 0.03);
-  const shape = new RAPIER.Capsule(hc, r);
-  const pos = { x: t.x, y: feetY + 0.04 + hc + r, z: t.z };
-  return world.intersectionWithShape(pos, { x: 0, y: 0, z: 0, w: 1 }, shape, undefined, undefined, player.collider) === null;
-}
-
-// Apply the pending kinematic move and update query structures for this tick.
-export function stepWorld(ctx) {
-  ctx.world.step();
-}
-
-// Feet position of the puppet in metres.
-export function feetPos(ctx) {
-  const p = ctx.player, t = p.body.translation();
-  return { x: t.x, y: t.y - p.halfCyl - p.radius, z: t.z };
-}
-
-// Cast a ray against static level geometry only (never the puppet itself). Returns distance or null.
-export function raycastStatic(ctx, ox, oy, oz, dx, dy, dz, maxDist) {
-  const { RAPIER, world, player } = ctx;
-  const ray = new RAPIER.Ray({ x: ox, y: oy, z: oz }, { x: dx, y: dy, z: dz });
-  const hit = world.castRay(ray, maxDist, true, undefined, undefined, player.collider);
-  return hit ? hit.timeOfImpact : null;
-}
-
-// Look for a wall beside the player. Casts a horizontal ray to the left and one to the right at torso height, out to
-// PUPPET.radius + WALLRUN.detectDist from the body centre, against static geometry only (WALL_GROUP).
-// `yaw` is the travel direction: forward = (sin yaw, cos yaw), right = (-cos yaw, sin yaw) (same handedness as input.js).
-// Returns { hit: false } or { hit: true, side: -1 (left) | 1 (right), normal: {x, z} (unit, pointing away from the wall), dist }.
-export function detectWall(ctx, yaw) {
-  const { RAPIER, world, player } = ctx, t = player.body.translation();
-  const feetY = t.y - player.halfCyl - player.radius;
-  const oy = feetY + m(WALLRUN.torso);
-  const reach = player.radius + m(WALLRUN.detectDist);
-  const rx = -Math.cos(yaw), rz = Math.sin(yaw);
-  let best = { hit: false };
-  for (const side of [-1, 1]) {
-    const ray = new RAPIER.Ray({ x: t.x, y: oy, z: t.z }, { x: rx * side, y: 0, z: rz * side });
-    const h = world.castRayAndGetNormal(ray, reach, true, undefined, WALL_RAY_GROUPS, player.collider);
-    if (!h) continue;
-    const l = Math.hypot(h.normal.x, h.normal.z);
-    if (l < 0.5) continue;                                    // a floor / ceiling face, not a wall
-    if (!best.hit || h.timeOfImpact < best.dist) best = { hit: true, side, normal: { x: h.normal.x / l, z: h.normal.z / l }, dist: h.timeOfImpact };
+  // ---- jump: buffer (pressed shortly before landing) + coyote time (shortly after leaving a ledge)
+  if (inp.jump) s.jumpBuf = JUMP.buffer; else s.jumpBuf = Math.max(0, s.jumpBuf - STEP);
+  if (grounded && s.vy <= 0) s.coyote = JUMP.coyote; else s.coyote = Math.max(0, s.coyote - STEP);
+  let jumped = false, launched = false, airJumped = false;     // launched: a jump / air jump / kick set vy this tick
+  if (s.jumpBuf > 0 && s.wallRunning) {                        // ---- wall-kick: up, away from the wall, a bit forward
+    const speed = Math.max(hs, m(WALLRUN.holdSpeed)) + m(WALLRUN.kickFwd);
+    s.vy = m(WALLRUN.kickUp);
+    s.vx = s.wallT.x * speed + s.wallN.x * m(WALLRUN.kickOut);
+    s.vz = s.wallT.z * speed + s.wallN.z * m(WALLRUN.kickOut);
+    s.regrabTimer = WALLRUN.regrabCd; s.lastWallN = s.wallN;   // must chain to a DIFFERENT wall
+    s.jumpBuf = 0; s.coyote = 0; s.bhopTimer = 0; s.dashT = 0;
+    s.wallRunning = false; launched = true;
+  } else if (s.jumpBuf > 0 && s.coyote > 0) {
+    s.vy = m(JUMP.impulse); s.jumpBuf = 0; s.coyote = 0; jumped = true;
+    s.dashT = 0;                                             // jumping out of a dash keeps its speed but frees the steering
+    if (s.bhopTimer > 0) {                                   // jumped inside the landing window: b-hop timing bonus
+      const v0 = Math.hypot(s.vx, s.vz);
+      let dx = 0, dz = 0;
+      if (inp.moving) { dx = inp.ax; dz = inp.az; }
+      else if (v0 > 1e-3) { dx = s.vx / v0; dz = s.vz / v0; }
+      s.vx += dx * m(BHOP.bonus); s.vz += dz * m(BHOP.bonus);
+      const cap = Math.max(m(BHOP.maxSpeed), v0), v1 = Math.hypot(s.vx, s.vz);   // ceiling, but never reduce a faster speed
+      if (v1 > cap) { s.vx *= cap / v1; s.vz *= cap / v1; }
+      s.bhopChain++;
+    }
+    s.bhopTimer = 0;
+    launched = true;
+  } else if (s.jumpBuf > 0 && !grounded && s.coyote <= 0 && s.airJumpsLeft > 0 && !landingSoon(ctx, s)) {
+    // ---- air jump: coyote time is over, so this press spends an air jump. Crisp push toward the held keys, speed never lost.
+    s.vy = m(JUMP.doubleJumpImpulse);
+    s.airJumpsLeft--; s.jumpBuf = 0; s.dashT = 0; launched = true; airJumped = true;
+    if (inp.moving) {
+      const v0 = Math.hypot(s.vx, s.vz);
+      s.vx += inp.ax * m(JUMP.doubleJumpDir); s.vz += inp.az * m(JUMP.doubleJumpDir);
+      const v1 = Math.hypot(s.vx, s.vz);
+      if (v1 < v0 && v1 > 1e-6) { s.vx *= v0 / v1; s.vz *= v0 / v1; }   // a snap-turn redirects, it does not brake
+    }
   }
-  return best;
-}
 
-// Distance (metres) from the feet straight down to static geometry, or Infinity if nothing is within maxDist.
-export function groundGap(ctx, maxDist) {
-  const { RAPIER, world, player } = ctx, t = player.body.translation();
-  const half = player.halfCyl + player.radius;
-  const ray = new RAPIER.Ray({ x: t.x, y: t.y, z: t.z }, { x: 0, y: -1, z: 0 });
-  const h = world.castRay(ray, half + maxDist, true, undefined, WALL_RAY_GROUPS, player.collider);
-  return h ? Math.max(0, h.timeOfImpact - half) : Infinity;
-}
+  // ---- dash (F): locks a horizontal direction for DASH.duration at DASH.speed (or the current speed if that is higher)
+  if (inp.dash && s.dashCd <= 0 && s.dashT <= 0) {
+    let dx = inp.ax, dz = inp.az;
+    if (!inp.moving) { dx = Math.sin(s.facing); dz = Math.cos(s.facing); }
+    s.dashX = dx; s.dashZ = dz;
+    s.dashSpeed = Math.max(m(DASH.speed), Math.hypot(s.vx, s.vz));
+    s.dashT = DASH.duration; s.dashCd = DASH.cooldown;
+    s.sliding = false;
+  }
+  const dashing = s.dashT > 0;
+  if (dashing) s.wallRunning = false;                         // a dash breaks away from the wall
 
-export { SCALE };
+  // ---- slide state: Shift held on the ground enters (with a speed boost), releasing / jumping / leaving the ground ends it
+  if (jumped || launched || dashing || s.wallRunning) s.sliding = false;
+  else if (s.sliding && (!inp.slide || (!grounded && s.coyote <= 0))) s.sliding = false;
+  else if (!s.sliding && inp.slide && grounded) {
+    s.sliding = true;
+    const v = Math.hypot(s.vx, s.vz);
+    if (v > m(SLIDE.minSpeed)) {                              // faster than maxEntrySpeed (b-hop speed): kept as is, no boost, no clamp
+      const t = v > m(SLIDE.maxEntrySpeed) ? v : Math.min(v * SLIDE.entryBoost, m(SLIDE.maxEntrySpeed));
+      s.vx *= t / v; s.vz *= t / v;
+    }
+  }
+
+  // ---- horizontal
+  const sp = runSpeed(s);
+  if (dashing) {                                              // locked burst
+    s.vx = s.dashX * s.dashSpeed; s.vz = s.dashZ * s.dashSpeed;
+  } else if (s.wallRunning) {                                 // run along the wall: speed kept (min holdSpeed), aimed along the tangent
+    const spd = Math.max(hs, m(WALLRUN.holdSpeed)), pin = m(WALLRUN.stick);
+    s.vx = s.wallT.x * spd - s.wallN.x * pin;
+    s.vz = s.wallT.z * spd - s.wallN.z * pin;
+  } else if (s.sliding && grounded) {
+    if (s.bhopTimer <= 0) {                                   // (inside the landing window a slide keeps all its speed)
+      const f = Math.pow(SLIDE.friction, STEP);               // glide: low friction, momentum kept
+      s.vx *= f; s.vz *= f;
+    }
+    if (inp.moving) {                                         // light steering: turns the slide, never adds speed
+      const cap = Math.max(Math.hypot(s.vx, s.vz), m(SLIDE.minSpeed)), a = m(SLIDE.steerAccel) * STEP;
+      s.vx += inp.ax * a; s.vz += inp.az * a;
+      const v = Math.hypot(s.vx, s.vz);
+      if (v > cap) { s.vx *= cap / v; s.vz *= cap / v; }
+    }
+  } else if (grounded && !jumped) {
+    if (s.bhopTimer > 0) { /* landing window: no friction, no run-speed clamp, speed is preserved */ }
+    else {                                                    // normal ground: velocity chases the wanted velocity, so speed above
+      const k = Math.min(1, STEP * MOVE.accel);               // the run cap bleeds back down smoothly
+      s.vx += (inp.ax * sp - s.vx) * k;
+      s.vz += (inp.az * sp - s.vz) * k;
+    }
+  } else if (inp.moving && !airJumped) {                      // air (and the takeoff tick): Quake air-strafe, no drag.
+    airAccelerate(s, inp.ax, inp.az, sp);                     // (the air-jump tick skips it, so the snap-turn keeps its speed)
+  }
+
+  // ---- vertical: stick to the ground, otherwise gravity (light while dashing, heavier on the way down than up)
+  if (launched) { /* takeoff tick: move with the full impulse */ }
+  else if (s.wallRunning) {                                   // light gravity, and the fall speed is clamped
+    s.vy = Math.max(s.vy - m(WALLRUN.wallGrav) * STEP, -m(WALLRUN.maxFall));
+  }
+  else if (grounded && s.vy <= 0) s.vy = -0.5;
+  else s.vy -= m(dashing ? DASH.airGrav : (s.vy > 0 ? JUMP.gravRise : JUMP.gravFall)) * STEP;
+
+  // ---- capsule height: eases to the slide height while sliding, back to standing only when there is headroom
+  const standH = m(PUPPET.height), slideH = m(SLIDE.height);
+  let target = s.sliding ? slideH : standH;
+  if (target > s.height + 1e-6 && !hasHeadroom(ctx, standH)) target = slideH;   // low ceiling: stay crouched
+  let h = s.height + (target - s.height) * Math.min(1, STEP * SLIDE.resize);
+  if (Math.abs(target - h) < 0.004) h = target;
+
+  const c = movePlayer(ctx, s.vx * STEP, s.vy * STEP, s.vz * STEP, h);
+  s.height = h;
+  if (s.vy > 0 && c.y < s.vy * STEP * 0.5) s.vy = 0;        // bonked a ceiling: stop rising
+
+  // wall detection: we wanted to cover vx,vz this tick but the controller let us move much less
+  const want = Math.hypot(s.vx, s.vz) * STEP, got = Math.hypot(c.x, c.z);
+  s.wallHit = want > m(RUN.wallMinSpeed) * STEP && got < want * RUN.wallRatio;
+  if (s.wallHit) { s.bhopTimer = 0; if (grounded) s.bhopChain = 0; }   // slamming into a wall ends the b-hop window
+  // blocked: the speed into the obstacle is gone. Keep only the motion the controller actually allowed (the slide along
+  // the wall), otherwise uncapped air speed would pile up against a wall and shoot out of it later
+  if (want > 1e-6 && got < want * 0.98) { s.vx = c.x / STEP; s.vz = c.z / STEP; }
+
+  // face the way we are moving (smoothly)
+  if (inp.moving || dashing || (s.sliding && Math.hypot(s.vx, s.vz) > m(SLIDE.minSpeed))) {
+    const d = Math.atan2(Math.sin(Math.atan2(s.vx, s.vz) - s.facing), Math.cos(Math.atan2(s.vx, s.vz) - s.facing));
+    s.facing += d * Math.min(1, STEP * 12);
+  }
+}
