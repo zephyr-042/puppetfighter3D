@@ -16,7 +16,7 @@ export const IDLE_INPUT = Object.freeze({ ax: 0, az: 0, moving: false, fwd: fals
 
 export function createPlayerState() {
   return { vx: 0, vz: 0, vy: 0, facing: 0, runT: 0, isIt: false, locked: false, wallHit: false, jumpBuf: 0, coyote: 0,
-           sliding: false, height: m(PUPPET.height),
+           sliding: false, slideBoostCd: 0, height: m(PUPPET.height),
            wasGrounded: true, airT: 0, bhopTimer: 0, bhopChain: 0,
            dashT: 0, dashCd: 0, dashX: 0, dashZ: 1, dashSpeed: 0,
            airJumpsLeft: JUMP.maxAirJumps, climbing: false,
@@ -91,6 +91,7 @@ export function stepPlayer(s, inp, ctx) {
   // ---- timers
   if (s.dashCd > 0) s.dashCd = Math.max(0, s.dashCd - STEP);
   if (s.dashT > 0) s.dashT = Math.max(0, s.dashT - STEP);
+  if (s.slideBoostCd > 0) s.slideBoostCd = Math.max(0, s.slideBoostCd - STEP);
   if (s.regrabTimer > 0) s.regrabTimer = Math.max(0, s.regrabTimer - STEP);
   if (grounded) s.airJumpsLeft = JUMP.maxAirJumps;
 
@@ -198,15 +199,24 @@ export function stepPlayer(s, inp, ctx) {
   const dashing = s.dashT > 0;
   if (dashing) s.wallRunning = false;                         // a dash breaks away from the wall
 
-  // ---- slide state: Shift held on the ground enters (with a speed boost), releasing / jumping / leaving the ground ends it
+  // ---- slide state: Shift held on the ground enters (with the Titanfall-style boost), releasing / jumping / leaving the ground ends it.
+  // Slide-hop: Shift stays held through a jump, so the landing re-enters the slide at once (inside the b-hop window it keeps all its
+  // speed, and a Space press there jumps straight out of it with the b-hop bonus). A jump / launch always clears `sliding` first, so
+  // the capsule stands back up in the air and the chain never gets stuck crouched.
   if (jumped || launched || dashing || s.wallRunning || grappling) s.sliding = false;
   else if (s.sliding && (!inp.slide || (!grounded && s.coyote <= 0))) s.sliding = false;
   else if (!s.sliding && inp.slide && grounded) {
     s.sliding = true;
-    const v = Math.hypot(s.vx, s.vz);
-    if (v > m(SLIDE.minSpeed)) {                              // faster than maxEntrySpeed (b-hop speed): kept as is, no boost, no clamp
-      const t = v > m(SLIDE.maxEntrySpeed) ? v : Math.min(v * SLIDE.entryBoost, m(SLIDE.maxEntrySpeed));
-      s.vx *= t / v; s.vz *= t / v;
+    if (s.slideBoostCd <= 0) {                                // flat burst: along the velocity, or the facing when (nearly) standing still
+      const v = Math.hypot(s.vx, s.vz), cap = m(SLIDE.maxBoostSpeed);
+      const add = Math.min(m(SLIDE.boostAdd), cap - v);       // a speed already above the cap is kept: no boost, no clamp
+      if (add > 1e-4) {
+        let dx, dz;
+        if (v > m(SLIDE.minSpeed)) { dx = s.vx / v; dz = s.vz / v; }
+        else { dx = Math.sin(s.facing); dz = Math.cos(s.facing); }
+        s.vx += dx * add; s.vz += dz * add;
+        s.slideBoostCd = SLIDE.boostCd;
+      }
     }
   }
 
@@ -280,6 +290,15 @@ export function stepPlayer(s, inp, ctx) {
   const climbed = s.vy <= 0 && c.y > 1e-4;
   s.climbing = climbed;
   if (want > 1e-6 && got < want * 0.98 && !climbed) { s.vx = c.x / STEP; s.vz = c.z / STEP; }
+
+  // downhill slide: the move went DOWN (c.y < -1e-4) while grounded, so add slopeAccel along the slide direction (ramps = speed).
+  // (-c.y must also beat 2 % of the horizontal travel, which ignores the sub-millimetre jitter of the ground stick on flat floors.)
+  if (s.sliding && grounded && c.y < -1e-4 && -c.y > got * 0.02) {
+    const v = Math.hypot(s.vx, s.vz);
+    const dx = v > 1e-3 ? s.vx / v : Math.sin(s.facing), dz = v > 1e-3 ? s.vz / v : Math.cos(s.facing);
+    const a = m(SLIDE.slopeAccel) * STEP;
+    s.vx += dx * a; s.vz += dz * a;
+  }
 
   // face the way we are moving (smoothly)
   if (inp.moving || dashing || (s.sliding && Math.hypot(s.vx, s.vz) > m(SLIDE.minSpeed))) {
