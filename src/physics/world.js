@@ -8,7 +8,7 @@
 
 import RAPIER from '@dimforge/rapier3d-compat';
 import { SCALE, STEP, m, PUPPET, MOVE, WALLRUN, MAP, GRAPPLE } from '../config.js';
-import DISTRICT_MAP, { floorSlabs, rampSpan } from '../game/maps.js';
+import DISTRICT_MAP, { floorSlabs, rampSpan, boxSpan } from '../game/maps.js';
 import { WALL_GROUP, PLAYER_GROUP } from './ragdoll.js';
 
 export { WALL_GROUP, PLAYER_GROUP };                          // WALL_GROUP: collision group of ALL static level geometry
@@ -26,8 +26,8 @@ function rampPoints(r) {
   const s = rampSpan(r), pts = [];
   for (const side of [-1, 1]) {
     const across = s.across + side * s.w;
-    const ends = [[s.lo, 0], [s.hi, 0], [s.hi, s.y1]];
-    if (s.y0 > 0) ends.push([s.lo, s.y0]);                   // a ramp that starts on a ledge has a flat low face; from the floor it is a plain prism
+    const ends = [[s.lo, s.base], [s.hi, s.base], [s.hi, s.y1]];     // underside at span.base (0 = floor)
+    if (s.y0 > s.base) ends.push([s.lo, s.y0]);              // a ramp that starts on a ledge has a flat low face; from the base it is a plain prism
     for (const [along, y] of ends) {
       const x = s.alongX ? along : across, z = s.alongX ? across : along;
       pts.push(m(x), m(y), m(z));
@@ -52,10 +52,10 @@ export async function createWorld(map = DISTRICT_MAP) {
     solid(RAPIER.ColliderDesc.cuboid(m(s.hw), th, m(s.hd)), fixed(m(s.x), -th, m(s.z)));
   }
 
-  // ---- boxes: base on the floor (y = 0), top at h
+  // ---- boxes: bottom at y0 (default 0 = on the floor), top at h; a box with y0 > 0 floats
   for (const b of map.boxes) {
-    const bh = m(b.h) / 2;
-    solid(RAPIER.ColliderDesc.cuboid(m(b.hw), bh, m(b.hd)), fixed(m(b.x), bh, m(b.z)));
+    const { cy, height } = boxSpan(b);
+    solid(RAPIER.ColliderDesc.cuboid(m(b.hw), m(height) / 2, m(b.hd)), fixed(m(b.x), m(cy), m(b.z)));
   }
 
   // ---- pillars: static cylinders, base on the floor
