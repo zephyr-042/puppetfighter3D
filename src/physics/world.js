@@ -4,9 +4,11 @@
 // Loads after: config.js
 
 import RAPIER from '@dimforge/rapier3d-compat';
-import { SCALE, STEP, m, PUPPET, MOVE, TEST_FLOOR, TEST_BLOCKS } from '../config.js';
+import { SCALE, STEP, m, PUPPET, MOVE, WALLRUN, TEST_FLOOR, TEST_BLOCKS } from '../config.js';
 
-export const WALL_GROUP = 0x0001;    // collision group of static level geometry (the camera ray hits these)
+export const WALL_GROUP = 0x0001;    // collision group of static level geometry (wall / ground rays only look at this group)
+const STATIC_GROUPS = (WALL_GROUP << 16) | 0xFFFF;       // member of WALL_GROUP, collides with everything
+const WALL_RAY_GROUPS = (0xFFFF << 16) | WALL_GROUP;     // a ray that only sees WALL_GROUP members
 
 export async function createWorld() {
   await RAPIER.init();
@@ -16,14 +18,14 @@ export async function createWorld() {
   // ---- static test floor: a thick box whose top face sits at y = 0
   const hw = m(TEST_FLOOR.hw), hd = m(TEST_FLOOR.hd), th = m(TEST_FLOOR.thickness) / 2;
   const floorBody = world.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(0, -th, 0));
-  world.createCollider(RAPIER.ColliderDesc.cuboid(hw, th, hd), floorBody);
+  world.createCollider(RAPIER.ColliderDesc.cuboid(hw, th, hd).setCollisionGroups(STATIC_GROUPS), floorBody);
 
   // ---- static test blocks: one cuboid per TEST_BLOCKS entry, same centre and half-extents as the meshes in render/scene.js
   // (x, z = centre, hw / hd = half width / depth, h = height; the bottom sits on the floor at y = 0)
   for (const b of TEST_BLOCKS) {
     const bh = m(b.h) / 2;
     const bb = world.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(m(b.x), bh, m(b.z)));
-    world.createCollider(RAPIER.ColliderDesc.cuboid(m(b.hw), bh, m(b.hd)), bb);
+    world.createCollider(RAPIER.ColliderDesc.cuboid(m(b.hw), bh, m(b.hd)).setCollisionGroups(STATIC_GROUPS), bb);
   }
 
   // ---- the puppet: kinematic capsule. cylinder half-height + radius = total height
@@ -95,6 +97,37 @@ export function raycastStatic(ctx, ox, oy, oz, dx, dy, dz, maxDist) {
   const ray = new RAPIER.Ray({ x: ox, y: oy, z: oz }, { x: dx, y: dy, z: dz });
   const hit = world.castRay(ray, maxDist, true, undefined, undefined, player.collider);
   return hit ? hit.timeOfImpact : null;
+}
+
+// Look for a wall beside the player. Casts a horizontal ray to the left and one to the right at torso height, out to
+// PUPPET.radius + WALLRUN.detectDist from the body centre, against static geometry only (WALL_GROUP).
+// `yaw` is the travel direction: forward = (sin yaw, cos yaw), right = (-cos yaw, sin yaw) (same handedness as input.js).
+// Returns { hit: false } or { hit: true, side: -1 (left) | 1 (right), normal: {x, z} (unit, pointing away from the wall), dist }.
+export function detectWall(ctx, yaw) {
+  const { RAPIER, world, player } = ctx, t = player.body.translation();
+  const feetY = t.y - player.halfCyl - player.radius;
+  const oy = feetY + m(WALLRUN.torso);
+  const reach = player.radius + m(WALLRUN.detectDist);
+  const rx = -Math.cos(yaw), rz = Math.sin(yaw);
+  let best = { hit: false };
+  for (const side of [-1, 1]) {
+    const ray = new RAPIER.Ray({ x: t.x, y: oy, z: t.z }, { x: rx * side, y: 0, z: rz * side });
+    const h = world.castRayAndGetNormal(ray, reach, true, undefined, WALL_RAY_GROUPS, player.collider);
+    if (!h) continue;
+    const l = Math.hypot(h.normal.x, h.normal.z);
+    if (l < 0.5) continue;                                    // a floor / ceiling face, not a wall
+    if (!best.hit || h.timeOfImpact < best.dist) best = { hit: true, side, normal: { x: h.normal.x / l, z: h.normal.z / l }, dist: h.timeOfImpact };
+  }
+  return best;
+}
+
+// Distance (metres) from the feet straight down to static geometry, or Infinity if nothing is within maxDist.
+export function groundGap(ctx, maxDist) {
+  const { RAPIER, world, player } = ctx, t = player.body.translation();
+  const half = player.halfCyl + player.radius;
+  const ray = new RAPIER.Ray({ x: t.x, y: t.y, z: t.z }, { x: 0, y: -1, z: 0 });
+  const h = world.castRay(ray, half + maxDist, true, undefined, WALL_RAY_GROUPS, player.collider);
+  return h ? Math.max(0, h.timeOfImpact - half) : Infinity;
 }
 
 export { SCALE };
