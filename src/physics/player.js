@@ -14,7 +14,7 @@ export function createPlayerState() {
            sliding: false, height: m(PUPPET.height),
            wasGrounded: true, airT: 0, bhopTimer: 0, bhopChain: 0,
            dashT: 0, dashCd: 0, dashX: 0, dashZ: 1, dashSpeed: 0,
-           airJumpsLeft: JUMP.maxAirJumps,
+           airJumpsLeft: JUMP.maxAirJumps, climbing: false,
            wallRunning: false, wallSide: 0, wallN: { x: 0, z: 0 }, wallT: { x: 0, z: 0 },
            regrabTimer: 0, lastWallN: null };
 }
@@ -199,7 +199,14 @@ export function stepPlayer(s, inp, ctx) {
   let h = s.height + (target - s.height) * Math.min(1, STEP * SLIDE.resize);
   if (Math.abs(target - h) < 0.004) h = target;
 
-  const c = movePlayer(ctx, s.vx * STEP, s.vy * STEP, s.vz * STEP, h);
+  // glued to the ground: the controller's own snap does not hold on a surface that turns downward (a ramp crest), so while
+  // grounded we also ask for a little extra downward travel; the controller stops at the surface, and on a real ledge it
+  // pulls us down at most MOVE.stick. s.vy itself stays tiny, so walking off a high ledge still starts a normal fall.
+  // Skipped right after a climb (pressing down into a slope only makes the controller turn less of the move into height), and
+  // the first two airborne ticks after leaving a surface still count as being on it, which is what covers a ramp crest.
+  const onSurface = grounded || s.airT < 0.04;
+  const stickDown = (onSurface && !launched && !s.wallRunning && s.vy <= 0 && !s.climbing) ? m(MOVE.stick) : 0;
+  const c = movePlayer(ctx, s.vx * STEP, s.vy * STEP - stickDown, s.vz * STEP, h);
   s.height = h;
   if (s.vy > 0 && c.y < s.vy * STEP * 0.5) s.vy = 0;        // bonked a ceiling: stop rising
 
@@ -209,7 +216,11 @@ export function stepPlayer(s, inp, ctx) {
   if (s.wallHit) { s.bhopTimer = 0; if (grounded) s.bhopChain = 0; }   // slamming into a wall ends the b-hop window
   // blocked: the speed into the obstacle is gone. Keep only the motion the controller actually allowed (the slide along
   // the wall), otherwise uncapped air speed would pile up against a wall and shoot out of it later
-  if (want > 1e-6 && got < want * 0.98) { s.vx = c.x / STEP; s.vz = c.z / STEP; }
+  // (not when the controller merely climbed a slope or step: we asked for no upward motion, it moved up anyway, and the
+  // horizontal shortfall went into height, not into a wall. Clamping there would bleed speed every tick on every ramp.)
+  const climbed = s.vy <= 0 && c.y > 1e-4;
+  s.climbing = climbed;
+  if (want > 1e-6 && got < want * 0.98 && !climbed) { s.vx = c.x / STEP; s.vz = c.z / STEP; }
 
   // face the way we are moving (smoothly)
   if (inp.moving || dashing || (s.sliding && Math.hypot(s.vx, s.vz) > m(SLIDE.minSpeed))) {
