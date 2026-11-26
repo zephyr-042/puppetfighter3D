@@ -1,15 +1,24 @@
 // src/physics/world.js
-// PHYSICS: the Rapier world, the static map (floor slabs with skylight holes, boxes, pillars, ramps) and the kinematic capsule.
+// PHYSICS: the Rapier world, the static map (floor slabs with skylight holes, boxes, pillars, ramps) and the kinematic player capsules.
 // Gameplay movement is a kinematic capsule driven by our own velocity; Rapier only resolves collisions.
-// Loads after: config.js, game/maps.js
+// One shared world holds up to MAX_PLAYERS capsules (PLAYER_GROUP). addPlayerCapsule(ctx) returns a per-player VIEW
+// { RAPIER, world, player }: every function below that takes `ctx` (movePlayer, detectWall, groundGap, feetPos, ...) and
+// stepPlayer(state, input, ctx) in player.js work unchanged on a view. Use the base ctx for stepWorld / ragdolls.
+// Loads after: config.js, game/maps.js, physics/ragdoll.js (collision-group constants only)
 
 import RAPIER from '@dimforge/rapier3d-compat';
 import { SCALE, STEP, m, PUPPET, MOVE, WALLRUN, MAP } from '../config.js';
 import DISTRICT_MAP, { floorSlabs, rampSpan } from '../game/maps.js';
+import { WALL_GROUP, PLAYER_GROUP } from './ragdoll.js';
 
-export const WALL_GROUP = 0x0001;    // collision group of ALL static level geometry (wall / ground / camera rays look at this group)
-const STATIC_GROUPS = (WALL_GROUP << 16) | 0xFFFF;       // member of WALL_GROUP, collides with everything
-const WALL_RAY_GROUPS = (0xFFFF << 16) | WALL_GROUP;     // a ray that only sees WALL_GROUP members
+export { WALL_GROUP, PLAYER_GROUP };                          // WALL_GROUP: collision group of ALL static level geometry
+const STATIC_GROUPS = (WALL_GROUP << 16) | 0xFFFF;            // member of WALL_GROUP, collides with everything
+const WALL_RAY_GROUPS = (0xFFFF << 16) | WALL_GROUP;          // a query that only sees WALL_GROUP members (never capsules / ragdolls)
+const PLAYER_GROUPS = (PLAYER_GROUP << 16) | WALL_GROUP;      // capsule: member of PLAYER_GROUP, collides with the level only
+
+// Rapier gravity. Only the cosmetic ragdoll bodies are dynamic: kinematic capsules and static geometry ignore it, and gameplay
+// gravity is still applied by player.js. A bit above 9.81 so tumbles feel snappy at game speed (player fall gravity is 27.5 m/s^2).
+const RAGDOLL_GRAVITY = 24;
 
 // Solid wedge for a ramp: a convex hull of the low / high edge profile. (A solid wedge, not a tilted slab, so there is no
 // hollow space under the ramp to slide into.) Returns a Float32Array of points in metres.
@@ -27,9 +36,11 @@ function rampPoints(r) {
   return new Float32Array(pts);
 }
 
+// Builds the static map and the (shared) character controller. Returns the BASE ctx { RAPIER, world, controller, players }.
+// Capsules are added afterwards with addPlayerCapsule().
 export async function createWorld(map = DISTRICT_MAP) {
   await RAPIER.init();
-  const world = new RAPIER.World({ x: 0, y: 0, z: 0 });   // gravity is applied by our own movement code
+  const world = new RAPIER.World({ x: 0, y: -RAGDOLL_GRAVITY, z: 0 });
   world.timestep = STEP;
 
   const fixed = (x, y, z) => world.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(x, y, z));
@@ -60,23 +71,33 @@ export async function createWorld(map = DISTRICT_MAP) {
     solid(hull, fixed(0, 0, 0));
   }
 
-  // ---- the puppet: kinematic capsule. cylinder half-height + radius = total height
+  // One character controller shared by every capsule (each call reads its result straight away, so there is no cross-talk).
+  const controller = world.createCharacterController(0.01);
+  controller.setUp({ x: 0, y: 1, z: 0 });
+  controller.enableAutostep(m(MOVE.stepHeight), m(PUPPET.radius) * 0.5, false);
+  controller.enableSnapToGround(m(8));
+  controller.setMaxSlopeClimbAngle(Math.PI * 0.3);
+  controller.setSlideEnabled(true);
+
+  return { RAPIER, world, controller, players: [] };
+}
+
+// Add one kinematic capsule (cylinder half-height + radius = total height) in PLAYER_GROUP and return its VIEW.
+// Capsules only collide with the level: never with each other (soft separation is game/rules.js) and never with ragdolls.
+export function addPlayerCapsule(ctx) {
+  const { world, controller } = ctx;
   const radius = m(PUPPET.radius);
   const halfCyl = (m(PUPPET.height) - 2 * radius) / 2;
   const body = world.createRigidBody(
     RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(0, halfCyl + radius + 0.01, 0)
   );
-  const collider = world.createCollider(RAPIER.ColliderDesc.capsule(halfCyl, radius), body);
-
-  const controller = world.createCharacterController(0.01);
-  controller.setUp({ x: 0, y: 1, z: 0 });
-  controller.enableAutostep(m(MOVE.stepHeight), radius * 0.5, false);
-  controller.enableSnapToGround(m(8));
-  controller.setMaxSlopeClimbAngle(Math.PI * 0.3);
-  controller.setSlideEnabled(true);
-
+  const collider = world.createCollider(
+    RAPIER.ColliderDesc.capsule(halfCyl, radius).setCollisionGroups(PLAYER_GROUPS), body
+  );
   const player = { body, collider, controller, halfCyl, radius, height: m(PUPPET.height), vy: 0, grounded: false };
-  return { RAPIER, world, player };
+  const view = { RAPIER, world, player };
+  ctx.players.push(view);
+  return view;
 }
 
 // Move the capsule by a desired displacement (metres) and report where it ended up.
@@ -86,7 +107,7 @@ export function movePlayer(ctx, dx, dy, dz, newHeight) {
   const { player } = ctx;
   if (dy > 0) player.controller.disableSnapToGround();      // never glue a jump back to the floor
   else player.controller.enableSnapToGround(m(8));
-  player.controller.computeColliderMovement(player.collider, { x: dx, y: dy, z: dz });
+  player.controller.computeColliderMovement(player.collider, { x: dx, y: dy, z: dz }, undefined, WALL_RAY_GROUPS);
   const c = player.controller.computedMovement();
   player.grounded = player.controller.computedGrounded();
   const t = player.body.translation();
@@ -101,6 +122,19 @@ export function movePlayer(ctx, dx, dy, dz, newHeight) {
   return c;
 }
 
+// Collision-aware horizontal shove of a capsule (metres), used to read the soft player separation of game/rules.js
+// (collidePlayers) back into the capsule after the world step. The move is clipped by walls, so a nudge never pushes a
+// puppet into the level.
+export function nudgePlayer(ctx, dx, dz) {
+  const { player } = ctx;
+  player.controller.disableSnapToGround();
+  player.controller.computeColliderMovement(player.collider, { x: dx, y: 0, z: dz }, undefined, WALL_RAY_GROUPS);
+  const c = player.controller.computedMovement(), t = player.body.translation();
+  const pos = { x: t.x + c.x, y: t.y, z: t.z + c.z };
+  player.body.setTranslation(pos, true);
+  player.body.setNextKinematicTranslation(pos);
+}
+
 // Is there room to stand at total height h right now? (static geometry only; the player's own collider is ignored.)
 // The test capsule is a touch smaller than the real one so floors and walls we are merely resting against do not count.
 export function hasHeadroom(ctx, h) {
@@ -109,10 +143,10 @@ export function hasHeadroom(ctx, h) {
   const r = player.radius * 0.9, hc = Math.max(0.01, (h - 2 * r) / 2 - 0.03);
   const shape = new RAPIER.Capsule(hc, r);
   const pos = { x: t.x, y: feetY + 0.04 + hc + r, z: t.z };
-  return world.intersectionWithShape(pos, { x: 0, y: 0, z: 0, w: 1 }, shape, undefined, undefined, player.collider) === null;
+  return world.intersectionWithShape(pos, { x: 0, y: 0, z: 0, w: 1 }, shape, undefined, WALL_RAY_GROUPS, player.collider) === null;
 }
 
-// Apply the pending kinematic move and update query structures for this tick.
+// Apply the pending kinematic moves of every capsule (and step the cosmetic ragdolls) for this tick. Takes the BASE ctx.
 export function stepWorld(ctx) {
   ctx.world.step();
 }
@@ -123,16 +157,22 @@ export function feetPos(ctx) {
   return { x: t.x, y: t.y - p.halfCyl - p.radius, z: t.z };
 }
 
-// Put the standing puppet on a spawn point (old units, y = feet height). Also restores the full standing capsule, in case the
-// player was sliding. Steps the world once so the query structures see the new position before the next move.
-export function teleportPlayer(ctx, x, y, z) {
+// Put the standing puppet at a feet position in METRES. Also restores the full standing capsule, in case the player was
+// sliding. With step = true (default) the world is stepped once so the query structures see the new position before the next
+// move; pass false when placing several capsules and step once afterwards.
+export function placePlayer(ctx, x, y, z, step = true) {
   const p = ctx.player, full = m(PUPPET.height), hc = (full - 2 * p.radius) / 2;
   p.collider.setHalfHeight(hc); p.halfCyl = hc; p.height = full;
-  const pos = { x: m(x), y: m(y) + hc + p.radius + 0.01, z: m(z) };
+  const pos = { x, y: y + hc + p.radius + 0.01, z };
   p.body.setTranslation(pos, true);
   p.body.setNextKinematicTranslation(pos);
   p.grounded = false;
-  ctx.world.step();
+  if (step) ctx.world.step();
+}
+
+// Same, but the position is in old units (y = feet height), like the map data.
+export function teleportPlayer(ctx, x, y, z) {
+  placePlayer(ctx, m(x), m(y), m(z));
 }
 
 // Fell off the roof or through a skylight: the feet are below MAP.fallY.
@@ -140,7 +180,7 @@ export function hasFallen(ctx) {
   return feetPos(ctx).y < m(MAP.fallY);
 }
 
-// Cast a ray against static level geometry only (never the puppet itself). Returns distance or null.
+// Cast a ray against static level geometry only (never a puppet). Returns distance or null.
 export function raycastStatic(ctx, ox, oy, oz, dx, dy, dz, maxDist) {
   const { RAPIER, world, player } = ctx;
   const ray = new RAPIER.Ray({ x: ox, y: oy, z: oz }, { x: dx, y: dy, z: dz });
