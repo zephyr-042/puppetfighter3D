@@ -99,14 +99,16 @@ export const GRAPPLE = {
   torso: 0.6,          // fraction of the current height where the rope leaves the body / the pull is measured from
 };
 
-// ---- crouch-slide (old units)
+// ---- crouch-slide (old units). Titanfall 2 flow: low friction, hard steering, a flat boost on entry, downhill acceleration.
 export const SLIDE = {
   height: 40,          // capsule height while sliding (40 units = 1.0 m; standing is PUPPET.height = 72 = 1.8 m)
-  entryBoost: 1.2,     // speed multiplier on entering a slide while moving faster than minSpeed
-  maxEntrySpeed: 460,  // the entry boost never pushes you above this; an entry already faster (b-hop speed) is kept as is, never reduced
-  friction: 0.55,      // speed multiplier per SECOND while sliding (applied as friction^dt each tick)
-  steerAccel: 90,      // units / s^2 of sideways steering toward the held keys (turns the slide, adds no speed)
-  minSpeed: 60,        // units / s: below this there is no entry boost, and steering may still creep up to this speed
+  friction: 0.84,      // speed multiplier per SECOND while sliding (applied as friction^dt each tick): slides carry momentum far
+  steerAccel: 240,     // units / s^2 of sideways steering toward the held keys (carves the slide, adds no speed)
+  boostAdd: 115,       // units / s ADDED to the horizontal speed on slide entry (along the velocity, or the facing when slow)
+  maxBoostSpeed: 680,  // the boost never pushes you above this; a faster entry (b-hop / dash / ramp speed) is kept as is, never reduced
+  boostCd: 0.75,       // s after a boost before the next slide entry can boost again (no boost spam from a standstill)
+  slopeAccel: 650,     // units / s^2 added along the slide direction while sliding DOWNHILL (grounded and the move went down: c.y < -1e-4)
+  minSpeed: 60,        // units / s: below this the facing direction is used for the boost, and steering may still creep up to this speed
   resize: 14,          // how fast the capsule height eases between standing and sliding (1 / s)
 };
 
