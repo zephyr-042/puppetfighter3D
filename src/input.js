@@ -14,7 +14,7 @@ window.addEventListener('keyup', (e) => { keys[e.code] = false; });
 window.addEventListener('blur', () => { for (const k in keys) keys[k] = false; jumpQueued = false; dashQueued = false; });
 
 // Snapshot for one tick. `f` = camera forward on the ground ({x, z}, unit length).
-// jump / dash: true on the tick after Space / F was pressed (edge, not held). slide: Shift is held.
+// jump / dash: true on the tick after Space / F was pressed (edge, not held). slide: Shift is held. fwd: W is held.
 // ax, az: wanted horizontal direction in world space (unit length, or 0 when no key is held).
 export function readInput(f) {
   const rx = -f.z, rz = f.x;                          // right = forward rotated 90 degrees
@@ -28,5 +28,6 @@ export function readInput(f) {
   const jump = jumpQueued; jumpQueued = false;
   const dash = dashQueued; dashQueued = false;
   const slide = !!(keys.ShiftLeft || keys.ShiftRight);   // held, not an edge
-  return { ax, az, moving: l > 0, jump, dash, slide };
+  const fwd = !!keys.KeyW;                               // forward held (wall-running needs it)
+  return { ax, az, moving: l > 0, fwd, jump, dash, slide };
 }
