@@ -16,11 +16,12 @@ export const PUPPET = {
   radius: 14,          // matches the old circle-vs-box radius
 };
 
-// ---- progressive momentum run (runT): ground speed ramps min -> max over rampT seconds of clean running
+// ---- progressive momentum run (runT): ground speed ramps min -> max over rampT seconds of clean running.
+// This is only the plain "hold W" speed. Anything above RUN.max comes from movement skill (air-strafing, b-hops, dash).
 export const RUN = {
   min: 210,            // old units / s at runT = 0
-  max: 400,            // old units / s once runT >= rampT
-  rampT: 1.25,         // seconds of clean running to reach max
+  max: 310,            // old units / s once runT >= rampT (the basic ground run cap)
+  rampT: 1.0,          // seconds of clean running to reach max
   itBonus: 1.06,       // speed multiplier while the player is IT
   stopDecay: 4,        // runT lost per second with no move input (on the ground)
   wallDecay: 6,        // runT lost per second while pressed against a wall
@@ -35,14 +36,33 @@ export const JUMP = {
   coyote: 0.10,        // s: a jump pressed this long after walking off a ledge still works
   gravRise: 850,       // units / s^2 while going up (floaty-free but readable arc)
   gravFall: 1100,      // units / s^2 while falling (heavier = crisper landings)
-  airAccel: 3,         // how fast velocity chases the wanted velocity in the air (ground uses MOVE.accel = 9)
+  // Quake / Source style air control: no horizontal drag in the air. Each tick the wish direction adds speed only while
+  // the speed ALONG that direction is below airWishCap, so strafing with the mouse turn keeps adding speed (no top limit).
+  airWishCap: 45,      // units / s: the wish speed used for the "how much more can I add" check (small = strafing matters)
+  airAccel: 14,        // acceleration factor: max added per tick = airAccel * runSpeed * dt (still limited by the cap check)
+};
+
+// ---- b-hop: landing opens a short window where ground friction / the run-speed clamp is skipped
+export const BHOP = {
+  window: 0.14,        // s after landing: speed is preserved; jumping inside it chains a b-hop
+  minAir: 0.05,        // s: time in the air before touching down counts as a landing (filters one-tick grounded flicker)
+  bonus: 25,           // units / s added along the movement direction by a b-hop (timing reward)
+  maxSpeed: 850,       // units / s: the b-hop bonus never pushes you past this (a higher speed is kept as is)
+};
+
+// ---- dash burst (F): horizontal launch along the held direction (or facing). Keeps runT and any higher speed.
+export const DASH = {
+  speed: 540,          // units / s during the dash (never lowers a faster speed)
+  duration: 0.2,       // s the direction is locked
+  cooldown: 1.3,       // s between dashes
+  airGrav: 250,        // units / s^2 while dashing (floaty, so a dash carries across gaps)
 };
 
 // ---- crouch-slide (old units)
 export const SLIDE = {
   height: 40,          // capsule height while sliding (40 units = 1.0 m; standing is PUPPET.height = 72 = 1.8 m)
   entryBoost: 1.2,     // speed multiplier on entering a slide while moving faster than minSpeed
-  maxEntrySpeed: 460,  // the boost never pushes you above this (a faster entry speed is kept, not reduced)
+  maxEntrySpeed: 460,  // the entry boost never pushes you above this; an entry already faster (b-hop speed) is kept as is, never reduced
   friction: 0.55,      // speed multiplier per SECOND while sliding (applied as friction^dt each tick)
   steerAccel: 90,      // units / s^2 of sideways steering toward the held keys (turns the slide, adds no speed)
   minSpeed: 60,        // units / s: below this there is no entry boost, and steering may still creep up to this speed
@@ -66,6 +86,10 @@ export const CAM = {
   pitchMin: -0.5,
   pitchMax: 1.2,
   fov: 75,
+  fovWarp: 15,         // degrees of extra FOV at full speed
+  fovWarpFrom: 300,    // units / s: horizontal speed where the warp starts
+  fovWarpTo: 750,      // units / s: horizontal speed where the warp is at full strength
+  fovWarpEase: 6,      // 1 / s: how fast the FOV follows
 };
 
 // ---- test floor (old units)
