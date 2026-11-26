@@ -7,7 +7,7 @@
 
 import * as THREE from 'three';
 import { m, PUPPET, CAM, MAP } from '../config.js';
-import DISTRICT_MAP, { floorSlabs, rampSpan } from '../game/maps.js';
+import DISTRICT_MAP, { floorSlabs, rampSpan, boxSpan } from '../game/maps.js';
 import { RAGDOLL_RIG } from '../physics/ragdoll.js';
 
 const FLOOR_COLOR = 0x4a5662, TRIM_COLOR = 0x9aa4b4, TILE_M = 5;   // floor grid tile (metres): gives a sense of speed
@@ -35,12 +35,12 @@ function makeFloorTexture() {
   return t;
 }
 
-// Solid ramp wedge: the side profile (low edge y0, high edge y1, flat bottom) extruded across the ramp width,
+// Solid ramp wedge: the side profile (low edge y0, high edge y1, flat bottom at span.base) extruded across the ramp width,
 // then turned so local +x points up the slope. Exported so a test can compare it with the physics hull.
 export function buildRampGeometry(r) {
   const s = rampSpan(r), L = m(s.len), W = m(s.wid);
   const shape = new THREE.Shape();
-  shape.moveTo(-L / 2, 0); shape.lineTo(L / 2, 0); shape.lineTo(L / 2, m(s.y1)); shape.lineTo(-L / 2, m(s.y0)); shape.closePath();
+  shape.moveTo(-L / 2, m(s.base)); shape.lineTo(L / 2, m(s.base)); shape.lineTo(L / 2, m(s.y1)); shape.lineTo(-L / 2, m(s.y0)); shape.closePath();
   const geo = new THREE.ExtrudeGeometry(shape, { depth: W, bevelEnabled: false });
   geo.translate(0, 0, -W / 2);
   geo.rotateY(s.rotY);
@@ -160,10 +160,11 @@ export function createScene() {
     trim(x0 - lip, x0, z0, z1); trim(x1, x1 + lip, z0, z1);                             // west / east of the hole
   }
 
-  // ---- boxes (base on the floor)
+  // ---- boxes (bottom at y0, default 0 = on the floor; y0 > 0 floats)
   for (const b of map.boxes) {
-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(m(b.hw) * 2, m(b.h), m(b.hd) * 2), matFor(b.c));
-    mesh.position.set(m(b.x), m(b.h) / 2, m(b.z));
+    const { cy, height } = boxSpan(b);
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(m(b.hw) * 2, m(height), m(b.hd) * 2), matFor(b.c));
+    mesh.position.set(m(b.x), m(cy), m(b.z));
     mesh.castShadow = true; mesh.receiveShadow = true;
     scene.add(mesh);
   }
