@@ -9,12 +9,13 @@ The old game stays live in its own repo; this is a separate project.
 index.html                 Page shell, loads src/main.js as a module.
 package.json               Dependencies (three, @dimforge/rapier3d-compat) and vite scripts.
 src/config.js              Every tunable number, in OLD 2.5D units. SCALE converts to metres at the point of use.
+src/game/maps.js           Map data (DISTRICT_MAP: boxes, pillars, holes, ramps, spawns) + shared floorSlabs() / rampSpan() geometry helpers.
 src/input.js                Keyboard state and the per-tick input snapshot (wanted direction, jump edge, dash edge, slide held; grab to follow).
 src/physics/player.js      Movement rules as stepPlayer(state, input, ctx): momentum run, jump, double jump, air-strafe, b-hop, crouch-slide, dash, wall-run, wall-kick; pillar orbit to follow.
-src/physics/world.js       Rapier world, static test floor + blocks (WALL_GROUP), kinematic capsule + character controller, static raycast, detectWall, groundGap.
-src/render/scene.js        Three.js renderer, lights, floor / blocks meshes, placeholder capsule puppet (setPuppetHeight squashes it).
+src/physics/world.js       Rapier world built from the map (floor slabs, boxes, pillars, ramp wedges, all in WALL_GROUP), kinematic capsule + character controller, rays, detectWall, groundGap, teleportPlayer, hasFallen.
+src/render/scene.js        Three.js renderer, lights, the District meshes (slabs + rim trims, boxes, pillars, ramps), city backdrop, placeholder capsule puppet (setPuppetHeight squashes it, setFocus moves the sun).
 src/render/camera.js       Mouse-orbit chase camera (PointerLock) with a Rapier raycast boom.
-src/main.js                Boot, fixed 60 Hz tick decoupled from the render loop. Loads LAST.
+src/main.js                Boot, spawn / fall respawn / R, fixed 60 Hz tick decoupled from the render loop. Loads LAST.
 ```
 
 ## Rules
@@ -33,7 +34,7 @@ src/main.js                Boot, fixed 60 Hz tick decoupled from the render loop
 |------|-------|--------|
 | 1 | Foundation: Vite + Three + Rapier, test floor, kinematic capsule with WASD, orbit chase camera with raycast boom | done |
 | 2 | Movement verbs from the old physics.js, one at a time (see Step 2 progress). Plan changed: movement before maps | in progress |
-| 3 | Maps: Roof first plus one ramp, then the other maps one at a time | |
+| 3 | Maps: District wired in (colliders, meshes, spawns, fall respawn); the other maps one at a time | in progress (District done, see Step 3 progress) |
 | 4 | Tag rules, scoring, rounds, dummies, HUD | |
 | 5 | Procedural 3D puppet, cosmetic ragdoll on stun / fall | |
 | 6 | Supabase lobby + WebRTC host / guest netcode | |
@@ -41,8 +42,7 @@ src/main.js                Boot, fixed 60 Hz tick decoupled from the render loop
 ## Step 1 notes
 
 - Movement started as a placeholder: camera-relative WASD, velocity chasing a wanted velocity, gravity, autostep.
-- `TEST_BLOCKS` in `config.js` (a two-step staircase, a tall wall, a crate) exists only to test step-up and the camera boom.
-  Step 3 (maps) replaces it with real map data.
+- The Step 1 test floor and `TEST_BLOCKS` are gone: `DISTRICT_MAP` (game/maps.js) replaced them in Step 3.
 - Run: `npm install` then `npm run dev`. Build: `npm run build` (output in `dist/`).
 
 ## Step 2 progress (movement verbs, one at a time)
@@ -52,7 +52,7 @@ src/main.js                Boot, fixed 60 Hz tick decoupled from the render loop
 | Progressive momentum run (`runT`) | done |
 | Jump (buffer, coyote time, heavier fall) | done |
 | Crouch-slide (+ capsule squash, low camera) | done |
-| Solid test blocks (one Rapier cuboid per `TEST_BLOCKS` entry) | done |
+| Solid blocks (one Rapier cuboid per map box; was the test gym, now the District map) | done |
 | Quake-style air-strafe + b-hop (no speed cap) | done |
 | Dash (F) | done |
 | Speed FOV warp | done |
@@ -114,9 +114,37 @@ src/main.js                Boot, fixed 60 Hz tick decoupled from the render loop
   chain count is left alone, and normal air-strafing continues from the next tick.
 - **Camera roll:** `updateCamera(..., wallSide)` eases `rig.roll` to `wallSide * camTilt` and applies it with `camera.rotateZ` after `lookAt`
   (leans away from the wall). HUD shows `AIRJ n`, `WALLRUN`, and `regrab` seconds.
-- **Test arena:** two tall walls (220 high, 170 apart, 440 long, around x = 450 / 620) were added to `TEST_BLOCKS` for wall-running. The older
-  blocks (24-90 high) are lower than the wall ray at the top of a jump, so they only catch the very start / end of a jump.
+- **Wall height:** the wall ray sits `torso` (36) above the feet, so a wall must be taller than the jump arc to be run along. The 175-high
+  Maze Alley brick walls are the main wall-run spot (east face of `box(-560, -660)` is x = -500, z -780..-540).
 - **Speed FOV (`CAM.fovWarp*`):** `updateCamera(..., speed)` eases the FOV up to +15 degrees between 300 and 750 units / s.
 - **HUD:** `spd`, `runT`, `BHOP` (chain count, `(window)` while open), `DASH` (ready / GO / cooldown seconds), `SLIDE`.
 - **Visuals:** `state.height` drives the mesh squash (`setPuppetHeight`) and the camera pivot (scaled by height / standing
   height), so the view drops smoothly with the body.
+
+## Step 3 progress (maps)
+
+| Item | Status |
+|------|--------|
+| District colliders: floor slabs around the 3 skylights, 42 boxes, 13 pillars, 3 ramp wedges | done |
+| District meshes: slabs (world-aligned grid), rim trims, boxes, pillars, ramps, building shaft + skyline | done |
+| Spawn at `DISTRICT_MAP.spawns`, respawn below -12 m, `R` | done |
+| Arena, Large, Roof, Complex maps | |
+
+- **Shared geometry (`game/maps.js`):** `floorSlabs(map)` cuts the roof rect into non-overlapping slabs around the holes (12 slabs for District; slabs +
+  holes = the rect exactly). `rampSpan(ramp)` gives the low / high edge, width and rotation of a ramp. world.js and scene.js both build from these.
+- **Colliders (world.js):** every static piece is in `WALL_GROUP` (floor slabs, boxes, cylinders for pillars, ramps), so `detectWall`, `groundGap` and the
+  camera boom all see the same geometry. A skylight hole is simply no collider there, so the player falls through.
+- **Ramps are solid wedges** (a convex hull of the edge profile), not tilted slabs: nothing hollow under them to slide into. Slopes 14.4 / 20.0 / 20.8 degrees.
+  A near-horizontal wall ray never counts a ramp surface as a wall (the normal filter rejects slopes under 30 degrees from horizontal).
+- **Slope handling in player.js (needed once ramps existed):**
+  1. The "blocked" velocity clamp is skipped when the controller climbed on its own (`vy <= 0` but `c.y > 0`): on a slope the controller turns part of the
+     horizontal move into height, and clamping that every tick bled speed (310 -> ~130 on ramp 3).
+  2. Ground stick: while on a surface the move also asks for `MOVE.stick` (8 units) extra downward travel so the puppet stays glued when the surface falls away
+     (ramp crest, small drop). Skipped the tick after a climb (pressing into a slope only costs climb), and the first 2 airborne ticks after leaving a surface still
+     count as on it. Rapier's own snap-to-ground did not hold on a crest.
+- **Falling:** `hasFallen(ctx)` = feet below `MAP.fallY` (-480 units = -12 m). `main.js` then respawns at the spawn point. `R` also respawns. `teleportPlayer`
+  restores the standing capsule (a slide shrinks it) and resets all movement state (`createPlayerState`).
+- **Spawn selection:** `MAP.spawn` (default 0) or `?spawn=N` in the page URL (0-5), e.g. `?spawn=2` drops you beside Maze Alley. Faces the middle of the roof.
+- **Rendering notes:** floor slabs share one grid texture with world-aligned offsets (5 m tiles) so lines run straight across slab seams; rim trims are visual
+  only (a 14-unit coping strip on the roof edge and around each hole); the roof sits on a 200 m dark facade shaft so skylights look into a drop; ~90 seeded dark
+  towers form the skyline; the sun and its 4096 shadow map follow the player (`setFocus`).
