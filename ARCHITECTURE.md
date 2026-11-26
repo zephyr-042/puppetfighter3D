@@ -6,16 +6,19 @@ The old game stays live in its own repo; this is a separate project.
 ## File map (one line per file; each file's header says what it loads after)
 
 ```
-index.html                 Page shell, loads src/main.js as a module.
+index.html                 Page shell + match HUD (timer, IT status, IT-time leaderboard, round / match banner), loads src/main.js as a module.
 package.json               Dependencies (three, @dimforge/rapier3d-compat) and vite scripts.
 src/config.js              Every tunable number, in OLD 2.5D units. SCALE converts to metres at the point of use.
 src/game/maps.js           Map data (DISTRICT_MAP: boxes, pillars, holes, ramps, spawns) + shared floorSlabs() / rampSpan() geometry helpers.
 src/input.js                Keyboard state and the per-tick input snapshot (wanted direction, jump edge, dash edge, slide held; grab to follow).
-src/physics/player.js      Movement rules as stepPlayer(state, input, ctx): momentum run, jump, double jump, air-strafe, b-hop, crouch-slide, dash, wall-run, wall-kick; pillar orbit to follow.
-src/physics/world.js       Rapier world built from the map (floor slabs, boxes, pillars, ramp wedges, all in WALL_GROUP), kinematic capsule + character controller, rays, detectWall, groundGap, teleportPlayer, hasFallen.
-src/render/scene.js        Three.js renderer, lights, the District meshes (slabs + rim trims, boxes, pillars, ramps), city backdrop, placeholder capsule puppet (setPuppetHeight squashes it, setFocus moves the sun).
+src/game/state.js          Plain-data match state (players, mode, timers, events). No engine deps. Spawns are passed in METRES.
+src/game/rules.js          Tag rules over that state: tag, dash shove, slide trip, soft separation, IT-time scoring, rounds / match end.
+src/physics/player.js      Movement rules as stepPlayer(state, input, ctx): momentum run, jump, double jump, air-strafe, b-hop, crouch-slide, dash, wall-run, wall-kick; `state.locked` ignores input (stun / freeze); pillar orbit to follow.
+src/physics/ragdoll.js     On-demand cosmetic 6-part Rapier ragdoll (spawnRagdoll / syncRagdollMeshes / despawnRagdoll), RAGDOLL_RIG dimensions, collision groups.
+src/physics/world.js       Rapier world built from the map (floor slabs, boxes, pillars, ramp wedges, all in WALL_GROUP), one kinematic capsule per player (PLAYER_GROUP) with a shared character controller, rays, detectWall, groundGap, placePlayer / teleportPlayer, nudgePlayer, hasFallen.
+src/render/scene.js        Three.js renderer, lights, the District meshes (slabs + rim trims, boxes, pillars, ramps), no background geometry, per-player puppets (faceless capsule + hidden 6-part ragdoll meshes), the red IT cone (setItMarker), setFocus moves the sun.
 src/render/camera.js       Mouse-orbit chase camera (PointerLock) with a Rapier raycast boom.
-src/main.js                Boot, spawn / fall respawn / R, fixed 60 Hz tick decoupled from the render loop. Loads LAST.
+src/main.js                Boot, 6-player match (1 human + 5 bots, botInput), the glue between player.js / world.js / rules.js, ragdoll on stun / fall, match HUD, fixed 60 Hz tick decoupled from the render loop. Loads LAST.
 ```
 
 ## Rules
@@ -27,6 +30,8 @@ src/main.js                Boot, spawn / fall respawn / R, fixed 60 Hz tick deco
   `KinematicCharacterController` only resolves collisions (slopes, steps). Gravity is applied by us, not by Rapier.
 - **Camera is view-only:** yaw / pitch live in the camera rig and never enter the simulation state.
 - **Physics code stays a pure function of (state, input)** where possible, so guest prediction can replay it later.
+- **Rendering budget:** District must hold 60+ FPS. No background geometry (no skyline / facade / street, only the sky gradient), sun shadow map 1024 x 1024,
+  floor slabs and trims never cast shadows (they only receive), one shared geometry per puppet part, camera far plane 400 m. Do not add decorative geometry without checking FPS.
 
 ## Migration plan
 
@@ -35,8 +40,8 @@ src/main.js                Boot, spawn / fall respawn / R, fixed 60 Hz tick deco
 | 1 | Foundation: Vite + Three + Rapier, test floor, kinematic capsule with WASD, orbit chase camera with raycast boom | done |
 | 2 | Movement verbs from the old physics.js, one at a time (see Step 2 progress). Plan changed: movement before maps | in progress |
 | 3 | Maps: District wired in (colliders, meshes, spawns, fall respawn); the other maps one at a time | in progress (District done, see Step 3 progress) |
-| 4 | Tag rules, scoring, rounds, dummies, HUD | |
-| 5 | Procedural 3D puppet, cosmetic ragdoll on stun / fall | |
+| 4 | Tag rules, scoring, rounds, bots, HUD | done (see Step 4-5 wiring) |
+| 5 | Procedural 3D puppet, cosmetic ragdoll on stun / fall | done as faceless capsule + 6-part ragdoll (see Step 4-5 wiring) |
 | 6 | Supabase lobby + WebRTC host / guest netcode | |
 
 ## Step 1 notes
@@ -126,8 +131,8 @@ src/main.js                Boot, spawn / fall respawn / R, fixed 60 Hz tick deco
 | Item | Status |
 |------|--------|
 | District colliders: floor slabs around the 3 skylights, 42 boxes, 13 pillars, 3 ramp wedges | done |
-| District meshes: slabs (world-aligned grid), rim trims, boxes, pillars, ramps, building shaft + skyline | done |
-| Spawn at `DISTRICT_MAP.spawns`, respawn below -12 m, `R` | done |
+| District meshes: slabs (world-aligned grid), rim trims, boxes, pillars, ramps (the old building shaft + skyline are gone, see Rendering budget) | done |
+| Spawn at `DISTRICT_MAP.spawns`, fall below -12 m (ragdoll + respawn, see Step 4-5 wiring), `R` | done |
 | Arena, Large, Roof, Complex maps | |
 
 - **Shared geometry (`game/maps.js`):** `floorSlabs(map)` cuts the roof rect into non-overlapping slabs around the holes (12 slabs for District; slabs +
@@ -142,9 +147,56 @@ src/main.js                Boot, spawn / fall respawn / R, fixed 60 Hz tick deco
   2. Ground stick: while on a surface the move also asks for `MOVE.stick` (8 units) extra downward travel so the puppet stays glued when the surface falls away
      (ramp crest, small drop). Skipped the tick after a climb (pressing into a slope only costs climb), and the first 2 airborne ticks after leaving a surface still
      count as on it. Rapier's own snap-to-ground did not hold on a crest.
-- **Falling:** `hasFallen(ctx)` = feet below `MAP.fallY` (-480 units = -12 m). `main.js` then respawns at the spawn point. `R` also respawns. `teleportPlayer`
-  restores the standing capsule (a slide shrinks it) and resets all movement state (`createPlayerState`).
-- **Spawn selection:** `MAP.spawn` (default 0) or `?spawn=N` in the page URL (0-5), e.g. `?spawn=2` drops you beside Maze Alley. Faces the middle of the roof.
+- **Falling:** `hasFallen(ctx)` = feet below `MAP.fallY` (-480 units = -12 m). `main.js` then treats it as a fall (ragdoll tumbles into the void, the player reappears on their spawn after 1.2 s). `R` triggers the same
+  fall (it is a "stuck" button, so it is NOT a free escape from IT). `placePlayer` / `teleportPlayer`
+  restore the standing capsule (a slide shrinks it) and `main.js` resets all movement state (`createPlayerState`).
+- **Spawn selection:** `MAP.spawn` (default 0) or `?spawn=N` in the page URL (0-5), e.g. `?spawn=2` drops YOU beside Maze Alley (the spawn list is rotated so the bots take the other five). Faces the middle of the roof.
 - **Rendering notes:** floor slabs share one grid texture with world-aligned offsets (5 m tiles) so lines run straight across slab seams; rim trims are visual
-  only (a 14-unit coping strip on the roof edge and around each hole); the roof sits on a 200 m dark facade shaft so skylights look into a drop; ~90 seeded dark
-  towers form the skyline; the sun and its 4096 shadow map follow the player (`setFocus`).
+  only (a 14-unit coping strip on the roof edge and around each hole); there is no geometry outside the roof (skylights look into the sky gradient + fog);
+  the sun and its 1024 shadow map follow the focus point (`setFocus`: your capsule, or your ragdoll torso while you tumble).
+
+## Step 4-5 wiring (tag match, bots, ragdolls, HUD)
+
+Six players: `YOU` (index 0) + `BOT 1..5`. `createGameState({ spawns })`, `addPlayer` x6, `resetRoundPlayers(gs, spawnsM)`, then `mode = 'countdown'`
+(same as `startMatch`). Game state is in METRES; `DISTRICT_MAP.spawns` are old units, so `main.js` converts them once (`spawnsM`) before handing them to
+state.js, which re-uses them on every round reset. `state.js` and `rules.js` are unchanged.
+
+**Per-player physics.** `world.js` keeps one shared Rapier world and one shared `KinematicCharacterController`. `addPlayerCapsule(ctx)` makes a kinematic capsule in
+`PLAYER_GROUP` (collides with the level only, never with other capsules or ragdolls) and returns a per-player VIEW `{ RAPIER, world, player }`. Every world.js helper
+and `stepPlayer(state, input, view)` take that view, so player.js needed no signature change. Use the base ctx for `stepWorld` and `spawnRagdoll`.
+World gravity is -24 m/s^2 but only the dynamic ragdoll bodies feel it; capsules stay kinematic and player.js still applies gameplay gravity.
+
+**Tick order (main.js `tick`, 60 Hz):**
+1. each player: input (human `readInput`, bot `botInput`, or `IDLE_INPUT` when locked), `stepPlayer` queues the kinematic move. `state.locked` = not `play` mode, or `stun > 0`, or downed;
+   locked players ignore input, so a knock plays out through normal friction / gravity (the human's input latches are still drained every tick).
+2. `stepWorld`: all capsules move, ragdolls tumble.
+3. capsules -> `gs.players[i]`: feet x / y / z, velocity, yaw, `sliding`, `dashing`, `runT`, `bhopChain`, `fell` (set for exactly one tick, rising edge for the fall penalty).
+4. `stepGameRules(gs, STEP)`.
+5. `gs` -> capsules: (a) a changed `vx / vz` means the rules knocked the player (tag, shove, trip): adopted into the movement state; (b) the position delta from
+   `collidePlayers` soft separation is applied with `nudgePlayer` (collision-aware, so it can not push a puppet into a wall); (c) a new `gs.round` re-places everyone
+   (`placeAll`); (d) ragdoll on / off (below).
+
+**Bots (`botInput(gs, idx)` in main.js).** No pathfinding. IT bot: chase the nearest runner (leading its velocity slightly), occasional hop, dash when within 5.5 m.
+Runner bot: run straight away from IT with a sine weave, dash within 4.2 m (a dashing runner shoves IT, see rules.js). Both look 0.5 s ahead along their velocity and steer
+away from the roof edge and the skylights, and un-stick themselves (barely moved in 0.5 s -> strafe + hop for 0.7 s).
+
+**Ragdoll lifecycle (cosmetic only; the capsule stays the single source of truth):**
+- `stun > 0` and no ragdoll: `spawnRagdoll(RAPIER, world, feet, velocity, knock impulse, { yaw })`, the capsule mesh is hidden, 6 meshes (`RAGDOLL_RIG` sizes, player colour, faceless)
+  follow the bodies each frame (`syncRagdollMeshes`). The capsule keeps moving under the knockback, so the ragdoll can end up a little away from it.
+- `stun` ends (or a new round starts): `despawnRagdoll`, capsule shown again.
+- Fall (feet below `MAP.fallY`) or `R`: ragdoll spawns where they fell, the capsule is parked on its spawn and stays hidden for `FALL_DOWN` = 1.2 s, and the rules see the
+  player at y = -1000 meanwhile (untaggable, no separation). `gs.fell` is raised for one tick, so rules.js hands them IT (fall penalty). After 1.2 s the ragdoll is removed and
+  the capsule appears on the spawn.
+- Chase camera: while YOUR ragdoll exists, `updateCamera` follows its torso (and the sun follows it); otherwise the capsule as before. The red IT cone follows the IT puppet's
+  torso while that puppet is ragdolling.
+
+**Puppets (render/scene.js).** `view.addPuppet(color)` returns `{ capsule, parts, setFeet, setHeight, showCapsule, showRagdoll }`. The capsule squashes with `state.height`
+(smooth, eased in player.js). One shared emissive red cone (`setItMarker`) hovers above whoever is IT. Geometry is shared by all puppets; each puppet owns one material.
+
+**HUD (index.html + main.js `updateHud`).** Top centre: round number, timer (red under 10 s), `TAG THEM!` (you are IT) / `RUN!`. Top right: live IT-time leaderboard (lowest IT time
+first = currently winning, IT marker, round wins), refreshed ~7x / s and only written to the DOM when it changed. Centre banner: countdown number, `GO!`, round winner
+(`roundend`), match winner (`matchend`, press Enter to start a new match via `startMatch`). Small toast line for tag / shove / trip / fall events (`drainEvents`, once per frame).
+Top left keeps the movement tuning line. Match settings (first to 3 round wins, 60 s rounds, 3 s countdown) are the `createGameState` defaults.
+
+**Known limits / next:** bots have no pathfinding (they can get boxed in by Maze Alley, the stuck logic frees them); the ragdoll is not synced to the capsule while it tumbles;
+no title screen or lobby yet (the match starts straight into the countdown); pillar orbit is still not implemented (wall-run covers curving around pillars).
