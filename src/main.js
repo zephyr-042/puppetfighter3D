@@ -3,8 +3,9 @@
 // Movement rules live in physics/player.js, keyboard in input.js; this file keeps just the loop and the wiring.
 // Loads after: everything
 
-import { STEP, MAX_STEPS_PER_FRAME, SCALE, RUN, CAM, PUPPET, m } from './config.js';
-import { createWorld, stepWorld, feetPos } from './physics/world.js';
+import { STEP, MAX_STEPS_PER_FRAME, SCALE, RUN, CAM, PUPPET, MAP, m } from './config.js';
+import DISTRICT_MAP from './game/maps.js';
+import { createWorld, stepWorld, feetPos, teleportPlayer, hasFallen } from './physics/world.js';
 import { createPlayerState, stepPlayer } from './physics/player.js';
 import { readInput } from './input.js';
 import { createScene } from './render/scene.js';
@@ -18,10 +19,28 @@ async function boot() {
   const state = createPlayerState();
   const hud = document.getElementById('hud');
 
+  // ---- spawn: DISTRICT_MAP.spawns[MAP.spawn], or ?spawn=N in the URL (handy for testing a part of the map)
+  const spawns = DISTRICT_MAP.spawns;
+  const asked = parseInt(new URLSearchParams(location.search).get('spawn'), 10);
+  const spawn = spawns[Number.isInteger(asked) && asked >= 0 && asked < spawns.length ? asked : MAP.spawn];
+  function respawn() {
+    teleportPlayer(ctx, spawn.x, spawn.y, spawn.z);
+    Object.assign(state, createPlayerState());                // all momentum, timers and chains reset
+    const dx = -spawn.x, dz = -spawn.z, l = Math.hypot(dx, dz) || 1;   // face the middle of the roof
+    state.facing = Math.atan2(dx, dz);
+    rig.yaw = Math.atan2(-dx / l, -dz / l);
+    rig.pitch = 0.25;
+  }
+  respawn();
+  let wantRespawn = false;
+  window.addEventListener('keydown', (e) => { if (e.code === 'KeyR' && !e.repeat) wantRespawn = true; });
+
   // one fixed simulation tick
   function tick() {
+    if (wantRespawn) { wantRespawn = false; respawn(); }
     stepPlayer(state, readInput(forwardOf(rig)), ctx);
     stepWorld(ctx);
+    if (hasFallen(ctx)) respawn();                            // off the roof or down a skylight
   }
 
   // render loop: accumulate real time, run whole ticks, then draw
@@ -45,6 +64,7 @@ async function boot() {
       (state.wallRunning ? '  WALLRUN' : state.regrabTimer > 0 ? '  regrab ' + state.regrabTimer.toFixed(2) + 's' : '') +
       (state.sliding ? '  SLIDE' : '');
     view.setPuppetHeight(state.height);
+    view.setFocus(feet);
     updateCamera(rig, view.camera, ctx, feet, dt, m(CAM.pivot) * state.height / m(PUPPET.height), hSpeed, state.wallRunning ? state.wallSide : 0);
     view.renderer.render(view.scene, view.camera);
     requestAnimationFrame(frame);
