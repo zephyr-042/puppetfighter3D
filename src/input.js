@@ -4,15 +4,17 @@
 
 const keys = {};
 let jumpQueued = false;                              // latched on key press, consumed by the next tick (no press is ever lost)
+let dashQueued = false;                              // same latch for the dash (F)
 window.addEventListener('keydown', (e) => {
   if (e.code === 'Space') { e.preventDefault(); if (!e.repeat) jumpQueued = true; }
+  if (e.code === 'KeyF' && !e.repeat) dashQueued = true;
   keys[e.code] = true;
 });
 window.addEventListener('keyup', (e) => { keys[e.code] = false; });
-window.addEventListener('blur', () => { for (const k in keys) keys[k] = false; jumpQueued = false; });
+window.addEventListener('blur', () => { for (const k in keys) keys[k] = false; jumpQueued = false; dashQueued = false; });
 
 // Snapshot for one tick. `f` = camera forward on the ground ({x, z}, unit length).
-// jump: true on the tick after Space was pressed (edge, not held). slide: Shift is held.
+// jump / dash: true on the tick after Space / F was pressed (edge, not held). slide: Shift is held.
 // ax, az: wanted horizontal direction in world space (unit length, or 0 when no key is held).
 export function readInput(f) {
   const rx = -f.z, rz = f.x;                          // right = forward rotated 90 degrees
@@ -24,6 +26,7 @@ export function readInput(f) {
   const l = Math.hypot(ax, az);
   if (l > 0) { ax /= l; az /= l; }
   const jump = jumpQueued; jumpQueued = false;
+  const dash = dashQueued; dashQueued = false;
   const slide = !!(keys.ShiftLeft || keys.ShiftRight);   // held, not an edge
-  return { ax, az, moving: l > 0, jump, slide };
+  return { ax, az, moving: l > 0, jump, dash, slide };
 }
