@@ -7,7 +7,7 @@
 // Loads after: config.js, game/maps.js, physics/ragdoll.js (collision-group constants only)
 
 import RAPIER from '@dimforge/rapier3d-compat';
-import { SCALE, STEP, m, PUPPET, MOVE, WALLRUN, MAP, GRAPPLE } from '../config.js';
+import { SCALE, STEP, m, PUPPET, MOVE, WALLRUN, MAP, GRAPPLE, MANTLE } from '../config.js';
 import DISTRICT_MAP, { floorSlabs, rampSpan, boxSpan } from '../game/maps.js';
 import { WALL_GROUP, PLAYER_GROUP } from './ragdoll.js';
 
@@ -137,13 +137,37 @@ export function nudgePlayer(ctx, dx, dz) {
 
 // Is there room to stand at total height h right now? (static geometry only; the player's own collider is ignored.)
 // The test capsule is a touch smaller than the real one so floors and walls we are merely resting against do not count.
-export function hasHeadroom(ctx, h) {
+// `at` (optional, metres) = { x, y, z } FEET position to test instead of the current one (used by checkLedgeMantle for the ledge top).
+export function hasHeadroom(ctx, h, at = null) {
   const { RAPIER, world, player } = ctx, t = player.body.translation();
-  const feetY = t.y - player.halfCyl - player.radius;
+  const feetY = at ? at.y : t.y - player.halfCyl - player.radius;
   const r = player.radius * 0.9, hc = Math.max(0.01, (h - 2 * r) / 2 - 0.03);
   const shape = new RAPIER.Capsule(hc, r);
-  const pos = { x: t.x, y: feetY + 0.04 + hc + r, z: t.z };
+  const pos = { x: at ? at.x : t.x, y: feetY + 0.04 + hc + r, z: at ? at.z : t.z };
   return world.intersectionWithShape(pos, { x: 0, y: 0, z: 0, w: 1 }, shape, undefined, WALL_RAY_GROUPS, player.collider) === null;
+}
+
+// Ledge mantle probe. (dirX, dirZ) = the horizontal direction we are being blocked in (the velocity direction). Casts ONE downward ray at
+// PUPPET.radius + MANTLE.reach ahead of the body centre, from feet + maxRise (48) down to feet + minRise (12), against WALL_GROUP only.
+// A ledge is found when the ray hits an upward-facing surface inside that range: the probe origin is free space (a wall taller than maxRise
+// would start the ray INSIDE its collider, which a solid cast reports at distance 0 with no normal, so it is rejected) and the standing
+// capsule fits on top (hasHeadroom at the ledge top). Returns { top, rise } (metres: absolute height of the surface, height above the feet) or null.
+// The caller (stepPlayer) has already checked airborne + moving forward + blocked; this only answers "is there a walkable lip right here".
+export function checkLedgeMantle(ctx, dirX, dirZ) {
+  const { RAPIER, world, player } = ctx, t = player.body.translation();
+  const l = Math.hypot(dirX, dirZ);
+  if (l < 1e-6) return null;
+  const dx = dirX / l, dz = dirZ / l;
+  const feetY = t.y - player.halfCyl - player.radius;
+  const ahead = m(PUPPET.radius + MANTLE.reach);
+  const ox = t.x + dx * ahead, oz = t.z + dz * ahead, oy = feetY + m(MANTLE.maxRise);
+  const ray = new RAPIER.Ray({ x: ox, y: oy, z: oz }, { x: 0, y: -1, z: 0 });
+  const h = world.castRayAndGetNormal(ray, m(MANTLE.maxRise - MANTLE.minRise), true, undefined, WALL_RAY_GROUPS, player.collider);
+  if (!h || h.timeOfImpact < 1e-4 || h.normal.y < MANTLE.minNormalY) return null;
+  const top = oy - h.timeOfImpact, rise = top - feetY;
+  if (rise < m(MANTLE.minRise) - 1e-4 || rise > m(MANTLE.maxRise) + 1e-4) return null;
+  if (!hasHeadroom(ctx, m(PUPPET.height), { x: ox, y: top, z: oz })) return null;
+  return { top, rise };
 }
 
 // Apply the pending kinematic moves of every capsule (and step the cosmetic ragdolls) for this tick. Takes the BASE ctx.
@@ -191,12 +215,13 @@ export function raycastStatic(ctx, ox, oy, oz, dx, dy, dz, maxDist) {
 // Look for a wall beside the player. Casts a horizontal ray to the left and one to the right at torso height, out to
 // PUPPET.radius + WALLRUN.detectDist from the body centre, against static geometry only (WALL_GROUP).
 // `yaw` is the travel direction: forward = (sin yaw, cos yaw), right = (-cos yaw, sin yaw) (same handedness as input.js).
+// `extraReach` (old units) is added to WALLRUN.detectDist: player.js passes WALLRUN.stickReach while already wall-running (hysteresis).
 // Returns { hit: false } or { hit: true, side: -1 (left) | 1 (right), normal: {x, z} (unit, pointing away from the wall), dist }.
-export function detectWall(ctx, yaw) {
+export function detectWall(ctx, yaw, extraReach = 0) {
   const { RAPIER, world, player } = ctx, t = player.body.translation();
   const feetY = t.y - player.halfCyl - player.radius;
   const oy = feetY + m(WALLRUN.torso);
-  const reach = player.radius + m(WALLRUN.detectDist);
+  const reach = player.radius + m(WALLRUN.detectDist + extraReach);
   const rx = -Math.cos(yaw), rz = Math.sin(yaw);
   let best = { hit: false };
   for (const side of [-1, 1]) {

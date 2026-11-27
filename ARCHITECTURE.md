@@ -8,17 +8,17 @@ The old game stays live in its own repo; this is a separate project.
 ```
 index.html                 Page shell + match HUD (timer, IT status, IT-time leaderboard, round / match banner), bottom hint bar incl. `[G] Mode: TAG / SANDBOX`, loads src/main.js as a module.
 package.json               Dependencies (three, @dimforge/rapier3d-compat) and vite scripts.
-src/config.js              Every tunable number, in OLD 2.5D units. SCALE converts to metres at the point of use.
+src/config.js              Every tunable number, in OLD 2.5D units. SCALE converts to metres at the point of use. Includes the feel blocks `MANTLE` (ledge mantle) and `LAND` (landing camera dip).
 src/game/maps.js           Map data (DISTRICT_MAP "Glitch" parkour arena: boxes with optional floating y0, pillars, holes, ramps, spawns) + shared boxSpan() / floorSlabs() / rampSpan() helpers + validateMap() (Node-runnable data checks).
 src/input.js                Keyboard state and the per-tick input snapshot (wanted direction, jump edge, dash edge, slide held, grapple held (E / right mouse); grab to follow).
 src/game/state.js          Plain-data match state (players, mode, timers, events). No engine deps. Spawns are passed in METRES.
 src/game/rules.js          Tag rules over that state: tag, dash shove, slide trip, soft separation, IT-time scoring, rounds / match end.
-src/physics/player.js      Movement rules as stepPlayer(state, input, ctx): momentum run, jump, double jump, air-strafe, b-hop, crouch-slide (Titanfall 2 style: entry boost, slope acceleration, slide-hop), dash, wall-run, wall-kick, grapple / sticky hand; `state.locked` ignores input (stun / freeze); pillar orbit to follow.
+src/physics/player.js      Movement rules as stepPlayer(state, input, ctx): momentum run, jump, double jump, air-strafe, b-hop, crouch-slide (Titanfall 2 style: entry boost, slope acceleration, slide-hop), dash, wall-run, wall-kick, grapple / sticky hand; `state.locked` ignores input (stun / freeze); pillar orbit to follow. Also: automatic ledge mantle after the move, look-steering air carve (W held), and a per-tick `state.sfx` list of sound events.
 src/physics/ragdoll.js     On-demand cosmetic 6-part Rapier ragdoll (spawnRagdoll / syncRagdollMeshes / despawnRagdoll), RAGDOLL_RIG dimensions, collision groups.
-src/physics/world.js       Rapier world built from the map (floor slabs, boxes, pillars, ramp wedges, all in WALL_GROUP), one kinematic capsule per player (PLAYER_GROUP) with a shared character controller, rays, detectWall, groundGap, placePlayer / teleportPlayer, nudgePlayer, hasFallen, raycastGrapple (level + player shots).
+src/physics/world.js       Rapier world built from the map (floor slabs, boxes, pillars, ramp wedges, all in WALL_GROUP), one kinematic capsule per player (PLAYER_GROUP) with a shared character controller, rays, detectWall, groundGap, placePlayer / teleportPlayer, nudgePlayer, hasFallen, raycastGrapple (level + player shots). Also `checkLedgeMantle(ctx, dirX, dirZ)` and `hasHeadroom(ctx, h, at?)`.
 src/render/scene.js        Three.js renderer, lights, the District meshes (slabs + rim trims, boxes, pillars, ramps), no background geometry, per-player puppets (faceless capsule + hidden 6-part ragdoll meshes), the red IT cone (setItMarker), setFocus moves the sun, setGrapple draws the grapple tether.
-src/render/camera.js       Mouse-orbit chase camera (PointerLock) with a Rapier raycast boom.
-src/main.js                Boot, 6-player match (1 human + 5 bots, botInput), the glue between player.js / world.js / rules.js, ragdoll on stun / fall, grapple aim + snag stun, crosshair / grapple HUD, fixed 60 Hz tick decoupled from the render loop, `[G]` / `?sandbox=1` TAG <-> SANDBOX toggle. Loads LAST.
+src/render/camera.js       Mouse-orbit chase camera (PointerLock) with a Rapier raycast boom. Landing dip spring (`triggerLandDip`).
+src/main.js                Boot, 6-player match (1 human + 5 bots, botInput), the glue between player.js / world.js / rules.js, ragdoll on stun / fall, grapple aim + snag stun, crosshair / grapple HUD, fixed 60 Hz tick decoupled from the render loop, `[G]` / `?sandbox=1` TAG <-> SANDBOX toggle. Loads LAST. Also `createAudio()` (zero-asset Web Audio synth) and the sound / landing-dip hooks.
 ```
 
 ## Rules
@@ -64,6 +64,7 @@ src/main.js                Boot, 6-player match (1 human + 5 bots, botInput), th
 | Double jump | done |
 | Wall-run + wall-kick (+ camera roll) | done |
 | Grapple / sticky hand (hold E or right mouse) | done (see Step 2.6 notes) |
+| Ledge mantle / vault, forgiving slide-hop window, look-steering, landing dip, procedural audio | done (see Step 2.7) |
 | Orbital pillar grab | |
 | Squash + tether visuals | |
 
@@ -79,13 +80,13 @@ src/main.js                Boot, 6-player match (1 human + 5 bots, botInput), th
   (ground uses `MOVE.accel`); with no keys the air momentum is kept. A ceiling bonk zeroes `vy`.
 - `movePlayer` disables Rapier's snap-to-ground on any upward move, so a jump is never pulled back to the floor.
 - Apex height = `impulse^2 / (2 * gravRise)` = 72 units (one puppet tall). Tune jump height with `impulse` / `gravRise`.
-- **Slide (Titanfall 2 flow):** `SLIDE` in `config.js` (height 40, friction 0.84, steerAccel 240, boostAdd 115, maxBoostSpeed 680, boostCd 0.75,
+- **Slide (Titanfall 2 flow):** `SLIDE` in `config.js` (height 40, friction 0.91, steerAccel 240, boostAdd 115, maxBoostSpeed 680, boostCd 0.75,
   slopeAccel 650, minSpeed 60, resize 14). The slide is meant to ACCELERATE combos, not brake them:
   - **Entry boost:** Shift held on the ground enters a slide. If `slideBoostCd <= 0`, `SLIDE.boostAdd` is ADDED to the horizontal speed along the
     velocity (along the facing when slower than `minSpeed`), but never past `maxBoostSpeed`; a speed already above 680 (b-hop / dash / ramp speed) is
     kept as is. A boost that fired starts `boostCd` 0.75 s (`state.slideBoostCd`), so tapping Shift from a standstill cannot be spammed. Entering
     with the cooldown running keeps the speed, no boost.
-  - **Glide + carve:** horizontal speed is multiplied by `friction^dt` (0.84 / s, so a slide carries far) and held keys steer by `steerAccel` (240) without
+  - **Glide + carve:** horizontal speed is multiplied by `friction^dt` (0.91 / s, so a slide carries far) and held keys steer by `steerAccel` (240) without
     ever adding speed (steering can still creep up to `minSpeed` from a standstill, so a slide never traps you). `runT` is held, not grown or drained.
   - **Downhill:** after the move, while `sliding && grounded && c.y < -1e-4` (the controller moved the capsule DOWN) `slopeAccel * STEP` is added along the
     slide direction. A second guard (`-c.y > 2 %` of the horizontal travel) ignores the micro-jitter of the ground stick on flat floors. Equilibrium on the
@@ -105,7 +106,7 @@ src/main.js                Boot, 6-player match (1 human + 5 bots, botInput), th
   sideways to the velocity, followed by turning the camera, keeps adding speed with no upper limit. Tune the gain with `JUMP.airWishCap`
   (bigger = faster gain) and `JUMP.airAccel`.
 - **B-hop (`BHOP` in config.js):** a landing (needs `minAir` 0.05 s in the air, which filters Rapier's one-tick grounded flicker on flat
-  ground) opens a `window` of 0.14 s with no friction and no run-speed clamp (slides keep their speed too). Jumping inside the window
+  ground) opens a `window` of 0.22 s with no friction and no run-speed clamp (slides keep their speed too). Jumping inside the window
   (jump buffer counts) adds `bonus` 25 units / s along the wish direction (ceiling `maxSpeed` 850 for the BONUS only, a faster speed is
   never reduced) and increments `bhopChain`. Letting the window expire, or hitting a wall, resets the chain and speed bleeds to the run cap.
   Blocked horizontal motion (walls) also removes the blocked speed, so uncapped air speed cannot pile up against a wall.
@@ -135,6 +136,33 @@ src/main.js                Boot, 6-player match (1 human + 5 bots, botInput), th
 - **HUD:** `spd`, `runT`, `BHOP` (chain count, `(window)` while open), `DASH` (ready / GO / cooldown seconds), `SLIDE`.
 - **Visuals:** `state.height` drives the mesh squash (`setPuppetHeight`) and the camera pivot (scaled by height / standing
   height), so the view drops smoothly with the body.
+
+## Step 2.7 notes (flow feel: mantle, forgiving slide-hops, look-steering, landing weight, procedural audio)
+
+Small mechanics that join the verbs together so a route never stops on a lip or a mistimed key. Nothing here adds speed except what is said.
+
+- **Ledge mantle / vault (`MANTLE` in config.js, `checkLedgeMantle` in world.js, the block after `movePlayer` in `stepPlayer`).** Triggers when ALL hold: not grounded, not wall-running,
+  moving forward (`want` above `MANTLE.minSpeed` 60 units / s per tick) and blocked (`got < want * 0.7`). `checkLedgeMantle(ctx, dirX, dirZ)` then casts ONE downward ray against
+  `WALL_GROUP` at `PUPPET.radius + 12` units ahead of the body centre, from `feet + 48` down to `feet + 12` (`castRayAndGetNormal`, solid). A ledge counts when the ray hits an upward-facing surface
+  (`normal.y >= 0.7`) inside that range, and `hasHeadroom(ctx, standingHeight, { x, y: top, z })` is clear at the ledge top (`hasHeadroom` gained an optional feet position). A wall taller than
+  48 units starts the ray INSIDE its collider, which a solid cast reports at distance 0 with no normal, so it is rejected (that is a wall, not a ledge). On a hit: `vy = max(vy, 180 units / s, what clears the lip)`
+  (`sqrt(2 * gravRise * (rise + 3 units)) * 1.08`, since 180 alone only rises about 19 units), the blocked-speed clamp is skipped so the HORIZONTAL velocity is left exactly as it was (100 % kept),
+  `wallHit` is not set (no `runT` bleed, no b-hop reset), and a `MANTLE.window` of 0.18 s starts. During the window the move also carries `MANTLE.forward` (1.5 units per tick) of extra forward DISPLACEMENT
+  (no velocity) so the capsule slides over the lip as soon as it clears it. When the feet rise to within 12 units of the lip it drops out of the probe's range while still blocked, so while the window is
+  open a blocked airborne tick keeps climbing (`vy >= 180`) with the speed untouched. Grounded players are not handled here: autostep covers 24 units, a jump covers the rest and then mantles.
+- **Slide-hop forgiveness:** `BHOP.window` 0.14 -> 0.22 s and `SLIDE.friction` 0.84 -> 0.91 per second, so a casual Shift + Space chain keeps its momentum without frame-perfect timing.
+- **Look-steering (`airAccelerate(..., carve)`):** the air carve (a pure rotation of `(vx, vz)` toward the wish direction, `JUMP.airTurnRate` 2.6 / s, magnitude preserved) now runs only while W (`input.fwd`) is
+  held, in the air and while hooked; strafing with A / D alone keeps pure Quake air-strafing. (`airTurnRate` already existed at 2.2 and carved on any movement key; it is now 2.6 and W-only.)
+- **Landing dip (`LAND` in config.js, `triggerLandDip(rig, impactVy)` in camera.js):** main.js calls it for the human on the tick a fall touches down (was airborne, now grounded, `vy < 0`; only
+  `vy < -4 m / s` counts). The camera pivot dips up to `LAND.dip` 0.15 m (less for a softer landing; a softer one never cuts a harder one short) and rebounds smoothly over `LAND.time` 0.2 s
+  (fast ease down for the first quarter, cosine ease back). Eased in `updateCamera`, view only.
+- **Procedural audio (`createAudio()` in main.js, no files):** the `AudioContext` is created and resumed by the first `pointerdown` / `keydown`; until then every call is a no-op. `[M]` mutes. One-shots are oscillator
+  pitch sweeps and bandpass-swept noise bursts: jump (sine thump 210 -> 80 Hz), air jump (thump + rising chirp), wall-kick (thump + chirp + noise tick), wall-run attach (low sine click),
+  dash (fast noise whoosh), grapple fire (whoosh + sawtooth / square metallic thwip, whether or not the shot hits). Two always-running noise loops only change gain / cutoff: slide hiss (bandpass, follows slide speed,
+  only while sliding on the ground) and wind (lowpass, silent below 450 units / s, full at 850). Everything goes through a master gain and a compressor.
+  `stepPlayer` fills `state.sfx` (`'jump' | 'airjump' | 'kick' | 'attach' | 'dash' | 'grapple'`, cleared at the start of each step); main.js plays the human's events right after the step. Bots make no sound.
+- **Not verified in a browser / with real Rapier.** `stepPlayer`'s mantle flow was exercised against a stub world (28 and 44 unit lips at 700 units / s: ends on top with the speed never below 700; a 60 unit wall does not
+  mantle); the dip curve was checked numerically. The real ray / headroom / controller interplay and every sound's loudness and taste still need a play-test. Tune from `MANTLE`, `LAND` and the `SFX` table in `createAudio()`.
 
 ## Step 2.6 notes (grapple / sticky hand)
 
