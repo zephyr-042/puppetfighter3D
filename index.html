@@ -7,56 +7,105 @@
 <style>
   html, body { margin: 0; height: 100%; background: #000; overflow: hidden; font-family: monospace; }
   canvas { display: block; }
-  .hud { position: fixed; pointer-events: none; user-select: none; }
+  .hud { position: fixed; pointer-events: none; user-select: none; z-index: 5; }
 
-  /* tuning line (movement debug), top left */
+  /* movement tuning line, top left */
   #hud { left: 10px; top: 8px; color: #f1c40f; font-size: 12px; }
 
-  /* round / timer / IT status, top centre */
-  #top { left: 0; right: 0; top: 10px; text-align: center; text-shadow: 0 2px 6px #000; }
-  #round { color: #9fb3c8; font-size: 12px; letter-spacing: 3px; }
-  #timer { color: #fff; font-size: 38px; font-weight: bold; line-height: 1.1; }
-  #timer.low { color: #ff6b5e; }
-  #status { font-size: 22px; font-weight: bold; letter-spacing: 4px; margin-top: 2px; }
-  #status.it { color: #ff4d4d; }
-  #status.run { color: #5ee6ff; }
+  /* player count + ping, bottom left */
+  #net { left: 12px; bottom: 10px; color: #9fb3c8; font-size: 12px; letter-spacing: 1px; text-shadow: 0 1px 4px #000; }
 
-  /* live IT-time leaderboard, top right */
-  #board { right: 12px; top: 10px; min-width: 210px; padding: 8px 10px; background: rgba(6, 10, 20, 0.62); border-radius: 6px; color: #dfe8f5; font-size: 12px; }
-  #board .head { color: #9fb3c8; font-size: 10px; letter-spacing: 2px; margin-bottom: 4px; }
-  #board .row { display: flex; align-items: center; gap: 6px; padding: 2px 0; }
-  #board .row.me { color: #fff; font-weight: bold; }
-  #board .sw { width: 10px; height: 10px; border-radius: 50%; flex: none; }
-  #board .nm { flex: 1; }
-  #board .tm { width: 52px; text-align: right; }
-  #board .st { width: 34px; text-align: right; color: #f1c40f; }
-  #board .itb { width: 16px; text-align: center; color: #ff4d4d; }
+  /* connection warning, top centre */
+  #netWarn { left: 0; right: 0; top: 14px; text-align: center; color: #ff6b5e; font-size: 16px; font-weight: bold; letter-spacing: 2px; text-shadow: 0 2px 6px #000; display: none; }
 
-  /* countdown / GO / round + match winner banner, screen centre */
-  #banner { left: 0; right: 0; top: 30%; text-align: center; text-shadow: 0 3px 10px #000; display: none; }
-  #bannerMain { color: #fff; font-size: 64px; font-weight: bold; }
-  #bannerSub { color: #cfe0f5; font-size: 18px; margin-top: 8px; }
-  #banner.win #bannerMain { font-size: 44px; color: #f1c40f; }
+  /* crosshair + grapple status, centre */
+  #crosshair { left: 50%; top: 50%; width: 6px; height: 6px; margin: -3px 0 0 -3px; border-radius: 50%; background: #fff;
+    box-shadow: 0 0 0 1px rgba(0,0,0,.75), 0 0 6px rgba(255,255,255,.6); }
+  #grappleStatus { left: 50%; top: 50%; margin-top: 14px; transform: translateX(-50%); font: 600 11px monospace; letter-spacing: 1px;
+    color: #9fe8ff; text-shadow: 0 0 3px #000; white-space: nowrap; }
 
-  /* small event line (tags, shoves, falls) */
-  #toast { left: 0; right: 0; top: 112px; text-align: center; color: #ffd9a8; font-size: 14px; text-shadow: 0 2px 6px #000; }
+  /* small event line */
+  #toast { left: 0; right: 0; top: 60px; text-align: center; color: #ffd9a8; font-size: 14px; text-shadow: 0 2px 6px #000; }
 
-  #hint b { font-weight: normal; color: #5c6b7d; }
-  #hint b.on { color: #f1c40f; font-weight: bold; }
-  #hint { left: 0; right: 0; bottom: 12px; text-align: center; color: #9fb3c8; font-size: 12px; }
+  /* shown while the mouse is not captured during play */
+  #resume { left: 0; right: 0; bottom: 40px; text-align: center; color: #cfe0f5; font-size: 13px; letter-spacing: 2px; text-shadow: 0 2px 6px #000; display: none; }
+
+  /* Tab-held scoreboard */
+  #scoreboard { left: 50%; top: 18%; transform: translateX(-50%); width: 400px; padding: 12px 14px; background: rgba(6, 10, 20, 0.82);
+    border-radius: 8px; color: #dfe8f5; font-size: 13px; display: none; }
+  #scoreboard .row { display: grid; grid-template-columns: 1fr 60px 70px; align-items: center; padding: 3px 0; }
+  #scoreboard .row.head { color: #9fb3c8; font-size: 10px; letter-spacing: 2px; border-bottom: 1px solid rgba(255,255,255,.12); margin-bottom: 4px; padding-bottom: 5px; }
+  #scoreboard .row.me { color: #fff; font-weight: bold; }
+  #scoreboard .nm { display: flex; align-items: center; gap: 8px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  #scoreboard .sw { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+  #scoreboard .n { text-align: right; }
+
+  /* join overlay */
+  #overlay { position: fixed; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center;
+    background: radial-gradient(ellipse at center, rgba(14, 24, 44, .78), rgba(2, 4, 10, .95)); }
+  #card { width: 420px; max-width: calc(100vw - 32px); padding: 26px 28px; background: rgba(10, 16, 30, .92); border: 1px solid rgba(159, 179, 200, .18);
+    border-radius: 12px; color: #dfe8f5; box-shadow: 0 20px 60px rgba(0, 0, 0, .6); }
+  #card h1 { margin: 0 0 4px; font-size: 26px; letter-spacing: 4px; color: #fff; }
+  #card .sub { color: #7f93a8; font-size: 11px; letter-spacing: 3px; margin-bottom: 20px; }
+  #card label { display: block; color: #9fb3c8; font-size: 10px; letter-spacing: 2px; margin: 0 0 6px; }
+  .fieldrow { display: flex; gap: 12px; align-items: flex-end; margin-bottom: 18px; }
+  .fieldrow .grow { flex: 1; }
+  #nameInput { width: 100%; box-sizing: border-box; padding: 10px 12px; background: #0a111e; border: 1px solid #2a3a52; border-radius: 6px;
+    color: #fff; font: 15px monospace; outline: none; }
+  #nameInput:focus { border-color: #5ee6ff; }
+  #colorInput { width: 52px; height: 41px; padding: 0; background: #0a111e; border: 1px solid #2a3a52; border-radius: 6px; cursor: pointer; }
+  #playBtn { width: 100%; padding: 13px; background: #5ee6ff; border: 0; border-radius: 6px; color: #04101c; font: bold 16px monospace; letter-spacing: 4px; cursor: pointer; }
+  #playBtn:hover:not(:disabled) { background: #8af0ff; }
+  #playBtn:disabled { opacity: .55; cursor: default; }
+  #overlayMsg { min-height: 16px; margin-top: 10px; color: #ff8a7a; font-size: 12px; text-align: center; }
+  #controls { margin-top: 18px; padding-top: 14px; border-top: 1px solid rgba(255,255,255,.1); display: grid; grid-template-columns: auto 1fr; gap: 5px 14px; font-size: 12px; }
+  #controls b { color: #f1c40f; font-weight: normal; white-space: nowrap; }
+  #controls span { color: #9fb3c8; }
 </style>
 </head>
 <body>
 <div id="hud" class="hud"></div>
-<div id="top" class="hud">
-  <div id="round"></div>
-  <div id="timer"></div>
-  <div id="status"></div>
-</div>
-<div id="board" class="hud"></div>
-<div id="banner" class="hud"><div id="bannerMain"></div><div id="bannerSub"></div></div>
+<div id="net" class="hud"></div>
+<div id="netWarn" class="hud">DISCONNECTED - reconnecting...</div>
+<div id="crosshair" class="hud"></div>
+<div id="grappleStatus" class="hud"></div>
 <div id="toast" class="hud"></div>
-<div id="hint" class="hud">Click to capture mouse &nbsp;|&nbsp; WASD move &nbsp;|&nbsp; Space jump &nbsp;|&nbsp; Shift slide (hold) &nbsp;|&nbsp; F dash &nbsp;|&nbsp; mouse orbit camera &nbsp;|&nbsp; R stuck (a fall in TAG, instant respawn in SANDBOX) &nbsp;|&nbsp; [G] Mode: <b id="modeTag" class="on">TAG</b> / <b id="modeSandbox">SANDBOX</b> &nbsp;|&nbsp; Esc release mouse</div>
+<div id="resume" class="hud">CLICK TO CAPTURE MOUSE</div>
+<div id="scoreboard" class="hud">
+  <div class="row head"><span>PLAYER</span><span class="n">KOs</span><span class="n">PING</span></div>
+  <div id="sbRows"></div>
+</div>
+
+<div id="overlay">
+  <div id="card">
+    <h1>PUPPET FIGHTER 3D</h1>
+    <div class="sub">MULTIPLAYER &middot; DISTRICT</div>
+    <div class="fieldrow">
+      <div class="grow">
+        <label for="nameInput">NAME</label>
+        <input id="nameInput" type="text" maxlength="16" autocomplete="off" spellcheck="false" placeholder="Player">
+      </div>
+      <div>
+        <label for="colorInput">COLOR</label>
+        <input id="colorInput" type="color" value="#5ee6ff">
+      </div>
+    </div>
+    <button id="playBtn" type="button">PLAY</button>
+    <div id="overlayMsg"></div>
+    <div id="controls">
+      <b>WASD</b><span>move</span>
+      <b>Space</b><span>jump / double jump / wall-kick</span>
+      <b>Shift</b><span>slide (hold), Shift + Space = slide-hop</span>
+      <b>F</b><span>dash</span>
+      <b>Right-Click / E</b><span>grapple (hold)</span>
+      <b>Left-Click</b><span>melee slash (coming in the next stage)</span>
+      <b>R</b><span>stuck? respawn</span>
+      <b>Tab</b><span>scoreboard (hold)</span>
+      <b>M</b><span>mute</span>
+      <b>Esc</b><span>release mouse</span>
+    </div>
+  </div>
+</div>
 <script type="module" src="/src/main.js"></script>
 </body>
 </html>
