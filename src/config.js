@@ -43,13 +43,13 @@ export const JUMP = {
   doubleJumpDir: 70,   // units / s: crisp impulse toward the held keys on an air jump (never lowers horizontal speed)
   airWishCap: 42,      // units / s: the wish speed used for the "how much more can I add" check (small = strafing matters)
   airAccel: 13,        // acceleration factor: max added per tick = airAccel * runSpeed * dt (still limited by the cap check)
-  airTurnRate: 2.2,    // 1 / s: while a direction is held in the air, this fraction per second (x STEP per tick) of the angle between the velocity and
-                       // the wish direction is rotated away, keeping the horizontal speed (Titanfall-style air carving; 0 = pure Source strafing)
+  airTurnRate: 2.6,    // 1 / s: while W (input.fwd) is held in the air, this fraction per second (x STEP per tick) of the angle between the velocity and
+                       // the wish direction (the camera-relative keys) is rotated away, keeping the horizontal speed (Titanfall-style look-steering; 0 = pure Source strafing)
 };
 
 // ---- b-hop: landing opens a short window where ground friction / the run-speed clamp is skipped
 export const BHOP = {
-  window: 0.14,        // s after landing: speed is preserved; jumping inside it chains a b-hop
+  window: 0.22,        // s after landing: speed is preserved; jumping inside it chains a b-hop (forgiving: casual Shift + Space slide-hops hold)
   minAir: 0.05,        // s: time in the air before touching down counts as a landing (filters one-tick grounded flicker)
   bonus: 25,           // units / s added along the movement direction by a b-hop (timing reward)
   maxSpeed: 850,       // units / s: the b-hop bonus never pushes you past this (a higher speed is kept as is)
@@ -110,7 +110,7 @@ export const GRAPPLE = {
 // ---- crouch-slide (old units). Titanfall 2 flow: low friction, hard steering, a flat boost on entry, downhill acceleration.
 export const SLIDE = {
   height: 40,          // capsule height while sliding (40 units = 1.0 m; standing is PUPPET.height = 72 = 1.8 m)
-  friction: 0.84,      // speed multiplier per SECOND while sliding (applied as friction^dt each tick): slides carry momentum far
+  friction: 0.91,      // speed multiplier per SECOND while sliding (applied as friction^dt each tick): slides carry momentum far
   steerAccel: 240,     // units / s^2 of sideways steering toward the held keys (carves the slide, adds no speed)
   boostAdd: 115,       // units / s ADDED to the horizontal speed on slide entry (along the velocity, or the facing when slow)
   maxBoostSpeed: 680,  // the boost never pushes you above this; a faster entry (b-hop / dash / ramp speed) is kept as is, never reduced
@@ -118,6 +118,20 @@ export const SLIDE = {
   slopeAccel: 650,     // units / s^2 added along the slide direction while sliding DOWNHILL (grounded and the move went down: c.y < -1e-4)
   minSpeed: 60,        // units / s: below this the facing direction is used for the boost, and steering may still creep up to this speed
   resize: 14,          // how fast the capsule height eases between standing and sliding (1 / s)
+};
+
+// ---- ledge mantle / vault: an airborne player who is blocked by a ledge top that is 12..48 units above the feet is popped up and over it,
+// keeping 100 % of the horizontal speed (wall-kicks and grapples onto decks / skybridges never bonk the lip). See checkLedgeMantle in world.js.
+export const MANTLE = {
+  maxRise: 48,         // old units: the downward probe starts this far above the feet (a ledge top higher than this is a wall, not a mantle)
+  minRise: 12,         // old units: the probe ends this far above the feet (a lower top is just a step: autostep / walking handles it)
+  reach: 12,           // old units: the probe sits PUPPET.radius + reach ahead of the body centre (just past the blocking face)
+  minNormalY: 0.7,     // the surface under the probe must face up at least this much to count as walkable (cos 45 degrees)
+  minSpeed: 60,        // units / s: slower than this is not "moving forward into the ledge"
+  popSpeed: 180,       // units / s: minimum upward speed of the pop (the pop is raised to whatever clears the lip, see player.js)
+  clear: 3,            // old units: the pop aims this far above the ledge top
+  forward: 1.5,        // old units per tick: small forward step added to the move while the mantle window is open (displacement only, no speed)
+  window: 0.18,        // s after the last probe hit during which the mantle continues (forward step, keep-climbing, speed kept)
 };
 
 // ---- movement
@@ -143,6 +157,13 @@ export const CAM = {
   fovWarpFrom: 300,    // units / s: horizontal speed where the warp starts
   fovWarpTo: 750,      // units / s: horizontal speed where the warp is at full strength
   fovWarpEase: 6,      // 1 / s: how fast the FOV follows
+};
+
+// ---- landing camera dip (camera.js triggerLandDip): the pivot dips on a hard landing and rebounds, so touchdowns have weight
+export const LAND = {
+  minVy: 4,            // m / s: only a fall faster than this (vy < -4) triggers the dip
+  dip: 0.15,           // metres of pivot drop at a hard landing (softer landings dip less)
+  time: 0.2,           // s for the whole dip + rebound
 };
 
 // ---- map (the map data itself lives in game/maps.js; these are the map-wide settings, old units)
