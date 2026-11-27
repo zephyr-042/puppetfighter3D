@@ -1,7 +1,7 @@
 // src/render/scene.js
 // RENDER (1/2): the Three.js renderer, lights, the District map (floor slabs with rim trims, boxes, pillars, ramp wedges),
 // and one puppet per player: a faceless coloured capsule (squashes while sliding) plus a hidden 6-part ragdoll mesh set that
-// matches RAGDOLL_RIG, the red "IT" cone marker and the glowing grapple tether (setGrapple). No background geometry at all (no skyline, facade or street): just the sky gradient.
+// matches RAGDOLL_RIG, the red "IT" cone marker and the glowing grapple tether (setGrapple). No background geometry at all (no skyline, facade or street): just a bright daytime sky gradient and a light horizon fog.
 // Meshes are built from the same map data and helpers (game/maps.js) as the physics colliders, so they always match.
 // Loads after: config.js, game/maps.js, physics/ragdoll.js (RAGDOLL_RIG dimensions only)
 
@@ -107,21 +107,21 @@ export function createScene() {
   document.body.appendChild(renderer.domElement);
 
   const scene = new THREE.Scene();
-  // night sky: a screen-space gradient, lighter toward the bottom so looking down reads as a glowing city
+  // daytime sky: a screen-space gradient, deep blue zenith -> pale mid-sky -> a bright horizon glow at the bottom
   const sky = document.createElement('canvas'); sky.width = 2; sky.height = 256;
   const sg = sky.getContext('2d'), grad = sg.createLinearGradient(0, 0, 0, 256);
-  grad.addColorStop(0, '#04070f'); grad.addColorStop(0.55, '#0b1226'); grad.addColorStop(1, '#1b2742');
+  grad.addColorStop(0, '#5ea8ff'); grad.addColorStop(0.55, '#bde0ff'); grad.addColorStop(1, '#eef7ff');
   sg.fillStyle = grad; sg.fillRect(0, 0, 2, 256);
   const skyTex = new THREE.CanvasTexture(sky); skyTex.colorSpace = THREE.SRGBColorSpace;
   scene.background = skyTex;
-  scene.fog = new THREE.Fog(0x0f1830, 160, 900);
+  scene.fog = new THREE.Fog(0xd8ecff, 220, 1100);          // light atmospheric horizon haze (metres)
 
-  // far = 400 m: the roof is ~105 m across and there is no background geometry, so nothing lives beyond that
+  // far = 400 m: the roof is ~120 m x 85 m and there is no background geometry, so nothing lives beyond that
   const camera = new THREE.PerspectiveCamera(CAM.fov, window.innerWidth / window.innerHeight, 0.1, 400);
 
   // lights: the sun follows the player (see setFocus) so one shadow map covers the area around you
-  scene.add(new THREE.HemisphereLight(0xcfdcff, 0x4a5468, 1.5));    // strong ambient: wall faces must stay readable at speed
-  const sun = new THREE.DirectionalLight(0xdfe8ff, 1.6);
+  scene.add(new THREE.HemisphereLight(0xdbeeff, 0x6b7785, 1.6));    // bright sky / ground bounce: wall faces stay readable at speed
+  const sun = new THREE.DirectionalLight(0xfff6e5, 1.8);              // warm midday sun
   sun.castShadow = true;
   sun.shadow.mapSize.set(1024, 1024);                  // 1024 keeps District at 60+ FPS (was 4096)
   const sc = sun.shadow.camera;
