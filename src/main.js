@@ -10,6 +10,7 @@
 //   3. capsules -> game state (positions in metres, velocities, flags, fell)
 //   4. stepGameRules: tags, shoves, trips, soft separation, IT time, rounds
 //   5. game state -> capsules: knock velocities, separation nudges, ragdoll spawn / despawn, round reset
+// Audio: createAudio() below is a zero-asset Web Audio synth (oscillator sweeps + filtered noise), unlocked by the first click / keypress, [M] mutes.
 // Loads after: everything
 
 import * as THREE from 'three';
@@ -22,7 +23,7 @@ import { createPlayerState, stepPlayer, IDLE_INPUT, endGrapple, torsoPos } from 
 import { spawnRagdoll, syncRagdollMeshes, despawnRagdoll } from './physics/ragdoll.js';
 import { readInput } from './input.js';
 import { createScene } from './render/scene.js';
-import { createCameraRig, forwardOf, updateCamera } from './render/camera.js';
+import { createCameraRig, forwardOf, updateCamera, triggerLandDip } from './render/camera.js';
 
 const NUM_BOTS = 5;                 // 1 human + 5 bots = MAX_PLAYERS (6)
 const FALL_DOWN = 1.2;              // s a player who fell stays "down" (ragdoll tumbling into the void) before reappearing on a spawn
@@ -43,8 +44,91 @@ function makeCrosshair() {
   return { dot, tag };
 }
 
+
+// ---- procedural audio (no files): everything is synthesised with Web Audio the moment it is needed ------------------------------------
+// The AudioContext can only start after a user gesture, so the first pointerdown / keydown creates + resumes it; until then every call is a no-op.
+// One-shots: thump / chirp (oscillator pitch sweeps), filtered-noise whooshes. Loops: one white-noise buffer through a bandpass (slide hiss)
+// and one through a lowpass (wind). The loops run all the time and only their gain / cutoff follow the player (setMotion), so there is no
+// start / stop click. All of it goes through a master gain and a compressor, so overlapping sounds can never clip.
+function createAudio(toast) {                                   // toast(msg): optional HUD message callback (the [M] mute notice)
+  let ac = null, master = null, noiseBuf = null, hissG = null, hissF = null, windG = null, windF = null, muted = false;
+  const AC = window.AudioContext || window.webkitAudioContext;
+
+  function build() {
+    if (ac || !AC) return;
+    ac = new AC();
+    const comp = ac.createDynamicsCompressor();
+    master = ac.createGain(); master.gain.value = muted ? 0 : 0.55;
+    master.connect(comp); comp.connect(ac.destination);
+    noiseBuf = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate);          // 2 s of white noise, shared by every noise sound
+    const d = noiseBuf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    const loop = (type, freq, q) => {
+      const src = ac.createBufferSource(); src.buffer = noiseBuf; src.loop = true;
+      const f = ac.createBiquadFilter(); f.type = type; f.frequency.value = freq; f.Q.value = q;
+      const g = ac.createGain(); g.gain.value = 0;
+      src.connect(f); f.connect(g); g.connect(master); src.start();
+      return { f, g };
+    };
+    const hiss = loop('bandpass', 3000, 0.7), wind = loop('lowpass', 500, 0.5);
+    hissF = hiss.f; hissG = hiss.g; windF = wind.f; windG = wind.g;
+  }
+  function unlock() {
+    build();
+    if (ac && ac.state === 'suspended') ac.resume();
+    if (ac && ac.state === 'running') for (const ev of ['pointerdown', 'keydown']) window.removeEventListener(ev, unlock, true);
+  }
+  for (const ev of ['pointerdown', 'keydown']) window.addEventListener(ev, unlock, true);
+  window.addEventListener('keydown', (e) => {
+    if (e.code !== 'KeyM' || e.repeat) return;
+    muted = !muted;
+    if (master) master.gain.setTargetAtTime(muted ? 0 : 0.55, ac.currentTime, 0.03);
+    if (toast) toast(muted ? 'SOUND OFF  [M]' : 'SOUND ON  [M]');
+  });
+
+  const live = () => ac && ac.state === 'running' && !muted;
+  // oscillator with an exponential pitch sweep f0 -> f1 and a fast attack / exponential decay
+  function tone(type, f0, f1, dur, gain, when = 0) {
+    const t0 = ac.currentTime + when, o = ac.createOscillator(), g = ac.createGain();
+    o.type = type; o.frequency.setValueAtTime(f0, t0); o.frequency.exponentialRampToValueAtTime(Math.max(20, f1), t0 + dur);
+    g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(gain, t0 + 0.006); g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    o.connect(g); g.connect(master); o.start(t0); o.stop(t0 + dur + 0.02);
+  }
+  // burst of the shared noise through a filter whose cutoff sweeps f0 -> f1 (a whoosh), or a short click when dur is tiny
+  function noise(type, f0, f1, q, dur, gain, when = 0) {
+    const t0 = ac.currentTime + when, s = ac.createBufferSource(), f = ac.createBiquadFilter(), g = ac.createGain();
+    s.buffer = noiseBuf; f.type = type; f.Q.value = q;
+    f.frequency.setValueAtTime(f0, t0); f.frequency.exponentialRampToValueAtTime(f1, t0 + dur);
+    g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(gain, t0 + Math.min(0.02, dur * 0.3)); g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    s.connect(f); f.connect(g); g.connect(master); s.start(t0, Math.random()); s.stop(t0 + dur + 0.02);
+  }
+
+  const SFX = {
+    jump()    { tone('sine', 210, 80, 0.12, 0.30); noise('lowpass', 900, 300, 0.7, 0.06, 0.05); },                      // clean pitch-swept thump
+    airjump() { tone('triangle', 330, 700, 0.13, 0.17); tone('sine', 190, 95, 0.09, 0.16); },                           // thump + rising chirp
+    kick()    { tone('sine', 150, 55, 0.14, 0.30); tone('triangle', 280, 620, 0.12, 0.16, 0.01); noise('bandpass', 1500, 3200, 1.2, 0.08, 0.07); },
+    attach()  { tone('sine', 95, 52, 0.09, 0.30); noise('bandpass', 1800, 900, 2, 0.02, 0.07); },                       // soft low-end magnetic click
+    dash()    { noise('bandpass', 500, 3600, 0.9, 0.24, 0.30); tone('sine', 140, 70, 0.10, 0.20); },                    // fast whoosh
+    grapple() { noise('bandpass', 900, 4200, 1.1, 0.14, 0.20); tone('sawtooth', 2300, 900, 0.11, 0.09);               // whoosh + metallic thwip
+                tone('square', 3450, 1350, 0.09, 0.04); }
+  };
+  function play(name) { if (live() && SFX[name]) SFX[name](); }
+
+  // per-frame loops. speed in old units / s, `sliding` = grounded slide. Wind starts at 450 and is full at 850 units / s; hiss follows the slide speed.
+  function setMotion(speed, sliding) {
+    if (!ac || !windG) return;
+    const now = ac.currentTime, on = live();
+    const w = on ? Math.pow(Math.max(0, Math.min(1, (speed - 450) / 400)), 1.3) : 0;
+    windG.gain.setTargetAtTime(w * 0.16, now, 0.08); windF.frequency.setTargetAtTime(350 + 1700 * w, now, 0.1);
+    const h = on && sliding ? Math.max(0.15, Math.min(1, speed / 700)) : 0;
+    hissG.gain.setTargetAtTime(h * 0.12, now, 0.05); hissF.frequency.setTargetAtTime(2200 + 1800 * h, now, 0.08);
+  }
+  return { play, setMotion };
+}
+
 async function boot() {
   const ctx = await createWorld();
+  const audio = createAudio((msg) => { if (el.toast) { el.toast.textContent = msg; toastT = 1.2; } });   // (el / toastT exist by the time a key is pressed)
   const view = createScene();
   const rig = createCameraRig(view.renderer.domElement);
   const xhair = makeCrosshair();
@@ -267,7 +351,12 @@ async function boot() {
       let snap;
       if (i === 0) { snap = readInput(forwardOf(rig)); if (snap.grapple) snap.aim = aimFromCamera(); }
       else snap = s.locked ? IDLE_INPUT : botInput(gs, i);   // (the human's latches must drain every tick)
+      const wasOnGround = views[i].player.grounded;
       stepPlayer(s, snap, views[i]);
+      if (i === 0) {                                      // feedback for the human: sounds of this tick, landing dip
+        for (const e of s.sfx) audio.play(e);
+        if (!wasOnGround && views[i].player.grounded && s.vy < 0) triggerLandDip(rig, s.vy);   // s.vy is still the touchdown speed here
+      }
     }
 
     // 2. all capsules move
@@ -458,6 +547,7 @@ async function boot() {
       updateCamera(rig, view.camera, hv, focus, dt, m(CAM.pivot) * hs.height / m(PUPPET.height), hSpeed, hs.wallRunning ? hs.wallSide : 0);
     }
     view.setFocus(focus);
+    audio.setMotion(hSpeed / SCALE, hs.sliding && hv.player.grounded && !rags[0]);   // slide hiss + high-speed wind (loops follow the speed)
 
     if (el.hud) el.hud.textContent = 'spd ' + Math.round(hSpeed / SCALE) + '  runT ' + hs.runT.toFixed(2) + ' / ' + RUN.rampT +
       '  BHOP ' + (hs.bhopChain > 0 ? 'x' + hs.bhopChain : '-') + (hs.bhopTimer > 0 ? ' (window)' : '') +
