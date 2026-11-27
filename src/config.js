@@ -71,8 +71,11 @@ export const WALLRUN = {
   kickFwd: 85,         // extra speed along the run direction
   regrabCd: 0.25,      // s during which the wall you just kicked off cannot be caught again
   entryUp: 90,         // units / s: upward pop when a wall is caught while FALLING (vy < 0), so runs carry along the whole wall instead of dipping off early
-  camTilt: 0.24,       // radians of camera roll while wall-running (leans away from the wall)
-  tiltEase: 16,        // 1 / s: how fast the roll (and the FOV kick / pivot drop below) follows: decisive the instant you attach
+  stickReach: 12,      // units: extra wall-ray reach while ALREADY wall-running (hysteresis): skimming a corner or curving round a pillar keeps the lock
+  dropCd: 0.15,        // s after a NATURAL drop (not a wall-kick) in which a catch gets no entryUp pop: grazing a wall end cannot spam the pop
+  camTilt: 0.22,       // radians of camera roll while wall-running (leans away from the wall)
+  tiltEase: 10,        // 1 / s: attach rate of the damped roll / FOV kick / pivot drop (the release is slower, see camHold)
+  camHold: 0.12,       // s the camera keeps the wall-run lean after the physics drops the wall, so a 1-3 tick edge blip never shakes the view
   camFov: 4,           // degrees of extra FOV while wall-running (camera.js)
   camDrop: 8,          // old units (0.2 m): the camera pivot sits this much lower while wall-running (camera.js)
 };
