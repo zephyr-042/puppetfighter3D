@@ -7,7 +7,7 @@ import { m, CAM, SCALE, WALLRUN } from '../config.js';
 import { raycastStatic } from '../physics/world.js';
 
 export function createCameraRig(domElement) {
-  const rig = { yaw: 0, pitch: 0.25, dist: m(CAM.dist), roll: 0, locked: false };
+  const rig = { yaw: 0, pitch: 0.25, dist: m(CAM.dist), roll: 0, wallK: 0, wallDir: 0, wallHold: 0, locked: false };
 
   domElement.addEventListener('click', () => {
     if (!rig.locked) domElement.requestPointerLock();
@@ -34,10 +34,17 @@ export function forwardOf(rig) {
 // `pivot` (metres above the feet) drops while sliding so the view sits low to the ground.
 // `speed` (metres / s, horizontal) widens the FOV by up to CAM.fovWarp degrees between fovWarpFrom and fovWarpTo (old units / s).
 // `wallSide` (-1 wall on the left, 1 wall on the right, 0 none) rolls the view by WALLRUN.camTilt, leaning away from the wall,
-// and while it is set the pivot drops WALLRUN.camDrop and the FOV gains WALLRUN.camFov degrees (eased), so a wall-run reads as its own state.
+// and while it is set the pivot drops WALLRUN.camDrop and the FOV gains WALLRUN.camFov degrees, so a wall-run reads as its own state.
+// Roll and wallK are exponentially damped (frame-rate independent) and the lean is held WALLRUN.camHold s after the wall is lost, so a
+// wall edge that flickers for a few ticks never shakes the view; the attach is quick, the release slower.
 export function updateCamera(rig, camera, ctx, feet, dt, pivot = m(CAM.pivot), speed = 0, wallSide = 0) {
   // wall-run kinesthetics: rig.wallK eases 0 -> 1 while a wall is held (same ease as the roll), driving a lower pivot and an extra FOV kick
-  rig.wallK = (rig.wallK || 0) + ((wallSide !== 0 ? 1 : 0) - (rig.wallK || 0)) * Math.min(1, dt * WALLRUN.tiltEase);
+  const dtc = Math.min(Math.max(dt, 0), 0.05);
+  if (wallSide !== 0) { rig.wallDir = wallSide; rig.wallHold = WALLRUN.camHold; }
+  else rig.wallHold = Math.max(0, rig.wallHold - dtc);
+  const lean = rig.wallHold > 0 ? rig.wallDir : 0;                      // the side we lean to (held through short drops)
+  const kLean = 1 - Math.exp(-dtc * WALLRUN.tiltEase * (lean !== 0 ? 1 : 0.6));
+  rig.wallK += ((lean !== 0 ? 1 : 0) - rig.wallK) * kLean;
   const px = feet.x, py = feet.y + pivot - m(WALLRUN.camDrop) * rig.wallK, pz = feet.z;
   // unit vector from the pivot to the wanted camera position
   const cp = Math.cos(rig.pitch), sp = Math.sin(rig.pitch);
@@ -55,7 +62,7 @@ export function updateCamera(rig, camera, ctx, feet, dt, pivot = m(CAM.pivot), s
   camera.lookAt(px, py, pz);
 
   // wall-run roll: eased, applied after lookAt as a roll about the view axis (camera.rotation.z in the camera's own frame)
-  rig.roll += (wallSide * WALLRUN.camTilt - rig.roll) * Math.min(1, dt * WALLRUN.tiltEase);
+  rig.roll += (lean * WALLRUN.camTilt - rig.roll) * kLean;
   if (Math.abs(rig.roll) > 1e-4) camera.rotateZ(rig.roll);
 
   // speed FOV warp: eased so a dash or a landing does not snap the view
