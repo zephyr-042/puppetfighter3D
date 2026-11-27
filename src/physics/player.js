@@ -26,7 +26,7 @@ export function createPlayerState() {
            dashT: 0, dashCd: 0, dashX: 0, dashZ: 1, dashSpeed: 0,
            airJumpsLeft: JUMP.maxAirJumps, climbing: false,
            wallRunning: false, wallSide: 0, wallN: { x: 0, z: 0 }, wallT: { x: 0, z: 0 },
-           regrabTimer: 0, lastWallN: null,
+           regrabTimer: 0, lastWallN: null, wallDropCd: 0,
            grappleActive: false, grappleAnchor: { x: 0, y: 0, z: 0 }, grappleTarget: -1, grappleT: 0, grappleCd: 0, grapplePrev: false,
            grappleHit: -1 };   // grappleHit: index of a player the hook just reached (main.js consumes it: shove + stun)
 }
@@ -107,6 +107,7 @@ export function stepPlayer(s, inp, ctx) {
   if (s.dashT > 0) s.dashT = Math.max(0, s.dashT - STEP);
   if (s.slideBoostCd > 0) s.slideBoostCd = Math.max(0, s.slideBoostCd - STEP);
   if (s.regrabTimer > 0) s.regrabTimer = Math.max(0, s.regrabTimer - STEP);
+  if (s.wallDropCd > 0) s.wallDropCd = Math.max(0, s.wallDropCd - STEP);
   if (grounded) s.airJumpsLeft = JUMP.maxAirJumps;
 
   // ---- grapple / sticky hand: a press (edge) fires a shot along the aim ray (inp.aim, set by main.js for the human); while hooked
@@ -150,7 +151,10 @@ export function stepPlayer(s, inp, ctx) {
   s.wallRunning = false;
   const hs = Math.hypot(s.vx, s.vz);
   if (!grounded && !grappling && inp.fwd && s.dashT <= 0 && s.airT >= WALLRUN.minAir && hs > m(WALLRUN.minSpeed)) {
-    const w = detectWall(ctx, Math.atan2(s.vx, s.vz));
+    // Already on a wall: track it directly. The rays are cast square to the LAST wall (yaw = its tangent, which follows a curved pillar
+    // as the normal turns) and reach `stickReach` further, so skimming a corner keeps the lock instead of dropping for a tick.
+    const w = wasWallRunning ? detectWall(ctx, Math.atan2(s.wallT.x, s.wallT.z), WALLRUN.stickReach)
+                             : detectWall(ctx, Math.atan2(s.vx, s.vz));
     const sameWall = s.regrabTimer > 0 && s.lastWallN && (w.hit && w.normal.x * s.lastWallN.x + w.normal.z * s.lastWallN.z > 0.9);
     if (w.hit && !sameWall) {
       let tx = -w.normal.z, tz = w.normal.x;                  // wall tangent, signed to point the way we are travelling
@@ -158,10 +162,13 @@ export function stepPlayer(s, inp, ctx) {
       if (Math.abs(s.vx * tx + s.vz * tz) / hs >= WALLRUN.minTangent) {
         s.wallRunning = true; s.wallSide = w.side; s.wallN = w.normal; s.wallT = { x: tx, z: tz };
         s.airJumpsLeft = JUMP.maxAirJumps;                    // catching a wall refills the air jump
-        if (!wasWallRunning && s.vy < 0) s.vy = m(WALLRUN.entryUp);   // entry pop: a falling catch is lifted, so the run reaches the end of the wall
+        // entry pop: once per wall-run chain (a fresh attach, not within dropCd of a natural drop), and only for a falling catch
+        if (!wasWallRunning && s.wallDropCd <= 0 && s.vy < 0) s.vy = m(WALLRUN.entryUp);
       }
     }
   }
+  // natural drop (the wall ended / was lost, no wall-kick: a kick happens below and leaves wasWallRunning false next tick)
+  if (wasWallRunning && !s.wallRunning && !grounded) s.wallDropCd = WALLRUN.dropCd;
 
   // ---- jump: buffer (pressed shortly before landing) + coyote time (shortly after leaving a ledge)
   if (inp.jump) s.jumpBuf = JUMP.buffer; else s.jumpBuf = Math.max(0, s.jumpBuf - STEP);
