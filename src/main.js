@@ -1,48 +1,35 @@
 // src/main.js
-// MAIN: boots the world + scene, runs the 6-player tag match (1 human + 5 bots), the fixed 60 Hz step decoupled from rendering,
-// the on-demand cosmetic ragdolls, the grapple aim / snag glue and the match HUD (plus a JS-built crosshair). Loads LAST.
-// [G] (or ?sandbox=1) toggles TAG MATCH <-> SANDBOX: solo free-roam, bots parked, no tag rules / timer / rounds, R = instant respawn.
-// Movement rules live in physics/player.js, tag rules in game/rules.js, keyboard in input.js; this file is the wiring.
+// MAIN: boots the world + scene, joins the Socket.IO room, runs YOUR player at 60 Hz (client-authoritative, 0 ms movement lag), sends a
+// volatile 'state' packet at 30 Hz, and renders every remote player from the server's 30 Hz 'snapshot' with exponential smoothing.
+// No bots and no tag rules here any more: movement lives in physics/player.js, the room in server.js, keyboard in input.js.
 //
-// One tick (STEP = 1/60):
-//   1. every player: input (human keyboard / botInput / locked) -> stepPlayer -> queued kinematic move
-//   2. stepWorld: all capsules move (and ragdolls tumble)
-//   3. capsules -> game state (positions in metres, velocities, flags, fell)
-//   4. stepGameRules: tags, shoves, trips, soft separation, IT time, rounds
-//   5. game state -> capsules: knock velocities, separation nudges, ragdoll spawn / despawn, round reset
+// One local tick (STEP = 1/60):
+//   1. read input -> stepPlayer (queues the kinematic move)      2. stepWorld (capsule moves, ragdolls tumble)
+//   3. fell below the map / R pressed -> local ragdoll + 'respawnReq'     4. every 2nd tick: send 'state'
+// Remote players are cosmetic: one puppet each (capsule squashed to `height`, grapple tether, ragdoll while their `ragdoll` flag is set).
 // Audio: createAudio() below is a zero-asset Web Audio synth (oscillator sweeps + filtered noise), unlocked by the first click / keypress, [M] mutes.
 // Loads after: everything
 
 import * as THREE from 'three';
-import { STEP, MAX_STEPS_PER_FRAME, SCALE, RUN, CAM, PUPPET, MAP, GRAPPLE, m } from './config.js';
+import { io } from 'socket.io-client';
+import { STEP, MAX_STEPS_PER_FRAME, SCALE, RUN, CAM, PUPPET, GRAPPLE, m } from './config.js';
 import DISTRICT_MAP from './game/maps.js';
-import { createGameState, addPlayer, resetRoundPlayers, startMatch, drainEvents } from './game/state.js';
-import { stepGameRules } from './game/rules.js';
-import { createWorld, addPlayerCapsule, stepWorld, feetPos, placePlayer, nudgePlayer, hasFallen } from './physics/world.js';
-import { createPlayerState, stepPlayer, IDLE_INPUT, endGrapple, torsoPos } from './physics/player.js';
+import { createWorld, addPlayerCapsule, stepWorld, feetPos, placePlayer, hasFallen } from './physics/world.js';
+import { createPlayerState, stepPlayer, endGrapple, torsoPos } from './physics/player.js';
 import { spawnRagdoll, syncRagdollMeshes, despawnRagdoll } from './physics/ragdoll.js';
-import { readInput } from './input.js';
+import { readInput, clearInput } from './input.js';
 import { createScene } from './render/scene.js';
 import { createCameraRig, forwardOf, updateCamera, triggerLandDip } from './render/camera.js';
 
-const NUM_BOTS = 5;                 // 1 human + 5 bots = MAX_PLAYERS (6)
-const FALL_DOWN = 1.2;              // s a player who fell stays "down" (ragdoll tumbling into the void) before reappearing on a spawn
-const LIMBO_Y = -1000;              // rules see a downed player this far below the map, so nobody can tag / bump the empty spawn
+const SEND_EVERY = 2;               // sim ticks per 'state' packet: 60 Hz / 2 = 30 Hz
+const SMOOTH = 18;                  // remote smoothing rate: k = 1 - exp(-SMOOTH * dt)
+const SNAP_DIST = 20;               // m: a remote farther than this from its target snaps instead of gliding (respawn, long lag spike)
+const RESPAWN_FALLBACK = 4;         // s: respawn locally if the server never answers
+const TETHER_SLOTS = 6;             // view.setGrapple slots (0 = you, 1.. = remote players); the server caps the room at 6
 const $ = (id) => document.getElementById(id);
-
-// Centre-screen aim dot + a small grapple status line under it (built here so index.html needs no change).
-function makeCrosshair() {
-  const dot = document.createElement('div');
-  dot.id = 'crosshair';
-  dot.style.cssText = 'position:fixed;left:50%;top:50%;width:6px;height:6px;margin:-3px 0 0 -3px;border-radius:50%;background:#fff;' +
-    'box-shadow:0 0 0 1px rgba(0,0,0,.75),0 0 6px rgba(255,255,255,.6);pointer-events:none;z-index:5';
-  const tag = document.createElement('div');
-  tag.id = 'grappleStatus';
-  tag.style.cssText = 'position:fixed;left:50%;top:50%;margin-top:14px;transform:translateX(-50%);font:600 11px monospace;letter-spacing:1px;' +
-    'color:#9fe8ff;text-shadow:0 0 3px #000;pointer-events:none;z-index:5;white-space:nowrap';
-  document.body.appendChild(dot); document.body.appendChild(tag);
-  return { dot, tag };
-}
+const r3 = (v) => Math.round(v * 1000) / 1000;
+const angDiff = (a, b) => { let d = (b - a) % (2 * Math.PI); if (d > Math.PI) d -= 2 * Math.PI; if (d < -Math.PI) d += 2 * Math.PI; return d; };
+const typingTarget = (e) => { const t = e.target; return !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA'); };
 
 
 // ---- procedural audio (no files): everything is synthesised with Web Audio the moment it is needed ------------------------------------
@@ -127,375 +114,346 @@ function createAudio(toast) {                                   // toast(msg): o
 }
 
 async function boot() {
+  // ---- DOM ----------------------------------------------------------------------------------------------------------------------
+  const el = { hud: $('hud'), net: $('net'), netWarn: $('netWarn'), toast: $('toast'), resume: $('resume'), xhair: $('crosshair'), gstat: $('grappleStatus'),
+               sb: $('scoreboard'), sbRows: $('sbRows'), overlay: $('overlay'), name: $('nameInput'), color: $('colorInput'),
+               play: $('playBtn'), msg: $('overlayMsg') };
+  let toastT = 0;
+  const toast = (msg, t = 1.6) => { el.toast.textContent = msg; toastT = t; };
+
+  // ---- world / scene ------------------------------------------------------------------------------------------------------------
   const ctx = await createWorld();
-  const audio = createAudio((msg) => { if (el.toast) { el.toast.textContent = msg; toastT = 1.2; } });   // (el / toastT exist by the time a key is pressed)
+  const audio = createAudio((msg) => toast(msg, 1.2));
   const view = createScene();
-  const rig = createCameraRig(view.renderer.domElement);
-  const xhair = makeCrosshair();
-  let xhairText = '';
+  const canvas = view.renderer.domElement;
+  const rig = createCameraRig(canvas);
+  view.setItMarker(null);                                   // nobody is IT in this game
 
-  // ---- spawns: DISTRICT_MAP.spawns are old units, game state is metres. ?spawn=N gives the HUMAN spawn N (rotates the list).
-  const raw = DISTRICT_MAP.spawns;
-  const asked = parseInt(new URLSearchParams(location.search).get('spawn'), 10);
-  const first = Number.isInteger(asked) && asked >= 0 && asked < raw.length ? asked : MAP.spawn;
-  const spawnsM = raw.map((_, k) => { const s = raw[(first + k) % raw.length]; return { x: m(s.x), y: m(s.y), z: m(s.z) }; });
+  const SPAWNS_M = DISTRICT_MAP.spawns.map((s) => ({ x: m(s.x), y: m(s.y || 0), z: m(s.z) }));
+  let lastSpawn = SPAWNS_M[0];
 
-  // ---- game state: player 0 = human, 1..5 = bots
-  const gs = createGameState({ spawns: spawnsM });
-  addPlayer(gs, { name: 'YOU' });
-  for (let b = 1; b <= NUM_BOTS; b++) addPlayer(gs, { name: 'BOT ' + b });
-  resetRoundPlayers(gs, spawnsM);
-  gs.round = 1; gs.mode = 'countdown'; gs.countdownLeft = gs.countdownTime;   // same as startMatch()
-  let lastRound = gs.round;
-  let sandbox = false;                         // SANDBOX (solo free-roam practice) vs TAG MATCH
-  const PARK = 1e9;                            // limbo value for parked bots: they never come back until the mode switches
-  const PARK_POS = { x: 5000, y: 200, z: 5000 };   // far off the map (never moved, never rendered, never a grapple target)
+  // YOUR capsule. (Remote players have no capsule: they are puppets only, so only level geometry can be grapple-hooked.)
+  const pv = addPlayerCapsule(ctx);
+  let me = createPlayerState();
+  function faceCenter(x, z) { me.facing = Math.atan2(-x, -z); rig.yaw = Math.atan2(x, z); rig.pitch = 0.25; }
+  placePlayer(pv, lastSpawn.x, lastSpawn.y, lastSpawn.z, false);
+  faceCenter(lastSpawn.x, lastSpawn.z);
+  stepWorld(ctx);
 
-  const N = gs.players.length;
-  const views = [], states = [], puppets = [], brains = [];
-  const rags = new Array(N).fill(null);        // live ragdoll (or null) per player
-  const limbo = new Array(N).fill(0);          // seconds left "down" after a fall
-  const forceFall = new Array(N).fill(false);  // R key (human)
-  const torso = Array.from({ length: N }, () => ({ x: 0, y: 0, z: 0 }));   // ragdoll torso position (chase camera / IT marker)
-  const sent = Array.from({ length: N }, () => ({ x: 0, z: 0, vx: 0, vz: 0 }));   // what we wrote into the game state this tick
-  for (let i = 0; i < N; i++) {
-    views.push(addPlayerCapsule(ctx));
-    states.push(createPlayerState());
-    puppets.push(view.addPuppet(gs.players[i].color));
-    brains.push({ t: 0, px: 0, pz: 0, stuck: 0, side: 1, hop: false, jumpT: 1 + gs.rng() * 2, dashDelay: 0, phase: gs.rng() * 6.28 });
+  // ---- net state ----------------------------------------------------------------------------------------------------------------
+  const serverUrl = new URLSearchParams(location.search).get('server') || undefined;   // dev: ?server=http://localhost:3000 (needs CORS_ORIGIN there)
+  const socket = io(serverUrl, { transports: ['websocket', 'polling'] });
+  let myId = null, myName = '', myColor = 0x5ee6ff, myKo = 0;
+  let wantJoin = false, joined = false;
+  let ping = 0, clockOffset = 0, bestRtt = Infinity, lastSnapT = 0;     // clockOffset: serverNow - clientNow (ms), see serverNow()
+  const serverNow = () => Date.now() + clockOffset;
+  const remotes = new Map();                                // id -> remote record
+  const slotUsed = new Array(TETHER_SLOTS).fill(false); slotUsed[0] = true;
+  const puppetPool = new Map();                             // colour -> idle puppets (a puppet's colour is fixed, so leavers are reused by colour)
+  let localPuppet = null;
+
+  // ---- local ragdoll + fall / respawn -------------------------------------------------------------------------------------------
+  let localRag = null;
+  const localTorso = { x: 0, y: 0, z: 0 };
+  let awaiting = false, respawnWait = 0, forceFall = false;           // awaiting = ragdolling, waiting for the server's 'respawn'
+  let fallPos = { x: 0, y: 0, z: 0 }, fallVel = { x: 0, y: 0, z: 0 }, fallYaw = 0;
+  let tickN = 0;
+
+  function spawnRag(pos, vel, yaw) {
+    return spawnRagdoll(ctx.RAPIER, ctx.world, pos, vel, { x: vel.x * 0.5, y: 0, z: vel.z * 0.5 }, { yaw, rng: Math.random });
+  }
+  function killLocalRagdoll() {
+    if (localRag) { despawnRagdoll(ctx.world, localRag); localRag = null; }
+    if (localPuppet) { localPuppet.showRagdoll(false); localPuppet.showCapsule(true); }
+  }
+  function applyRespawn(sp) {
+    killLocalRagdoll();
+    lastSpawn = sp;
+    placePlayer(pv, sp.x, sp.y || 0, sp.z, false);
+    me = createPlayerState();                               // momentum, cooldowns, chains, grapple: all fresh
+    faceCenter(sp.x, sp.z);
+    awaiting = false; respawnWait = 0; forceFall = false;
+    clearInput();
+    stepWorld(ctx);                                         // one step so the query structures see the new position
+    sendState();
+  }
+  function startFall() {                                    // fell below MAP.fallY (hasFallen) or pressed R
+    const f = feetPos(pv);
+    fallPos = { x: f.x, y: f.y, z: f.z };
+    fallVel = { x: me.vx, y: Math.min(me.vy, 0), z: me.vz };
+    fallYaw = me.facing;
+    if (me.grappleActive) endGrapple(me);
+    if (localRag) despawnRagdoll(ctx.world, localRag);
+    localRag = spawnRag(fallPos, fallVel, fallYaw);         // brief tumble, cosmetic only
+    awaiting = true; respawnWait = 0; forceFall = false;
+    placePlayer(pv, lastSpawn.x, lastSpawn.y || 0, lastSpawn.z, false);   // park the capsule safely; it stays hidden while down
+    me = createPlayerState(); me.locked = true; me.facing = fallYaw;
+    sendState();                                            // 'ragdoll: true' goes out at once
+    if (socket.connected) socket.emit('respawnReq');
   }
 
-  // ---- ragdolls -------------------------------------------------------------------------------------------------------------
-  function startRagdoll(i, pos, vel, imp, yaw) {
-    if (rags[i]) despawnRagdoll(ctx.world, rags[i]);
-    rags[i] = spawnRagdoll(ctx.RAPIER, ctx.world, pos, vel, imp, { yaw, rng: gs.rng });
-  }
-  function killRagdoll(i) {
-    if (rags[i]) { despawnRagdoll(ctx.world, rags[i]); rags[i] = null; }
-    puppets[i].showRagdoll(false); puppets[i].showCapsule(true);
-  }
-
-  // ---- placing players on their game-state positions (match start, new round, restart) --------------------------------------
-  function faceCenter(i) {
-    const p = gs.players[i];
-    states[i].facing = p.yaw = Math.atan2(-p.x, -p.z);   // face the middle of the roof
-    if (i === 0) { rig.yaw = Math.atan2(p.x, p.z); rig.pitch = 0.25; }
-  }
-  function placeAll() {
-    gs.players.forEach((p, i) => {
-      placePlayer(views[i], p.x, p.y, p.z, false);
-      states[i] = createPlayerState();                    // all momentum, timers and chains reset
-      states[i].isIt = p.isIt;
-      limbo[i] = 0; forceFall[i] = false;
-      killRagdoll(i);
-      faceCenter(i);
+  // ---- state packet (30 Hz) ----------------------------------------------------------------------------------------------------
+  function sendState() {
+    if (!joined || !socket.connected) return;
+    let x, y, z, vx, vy, vz, yaw, h;
+    if (awaiting) { x = fallPos.x; y = fallPos.y; z = fallPos.z; vx = fallVel.x; vy = fallVel.y; vz = fallVel.z; yaw = fallYaw; h = m(PUPPET.height); }
+    else { const f = feetPos(pv); x = f.x; y = f.y; z = f.z; vx = me.vx; vy = me.vy; vz = me.vz; yaw = me.facing; h = me.height; }
+    const ga = !awaiting && me.grappleActive;
+    socket.volatile.emit('state', {
+      x: r3(x), y: r3(y), z: r3(z), vx: r3(vx), vy: r3(vy), vz: r3(vz), yaw: r3(yaw), height: r3(h),
+      sliding: !awaiting && !!me.sliding, dashing: !awaiting && me.dashT > 0, wallRunning: !awaiting && !!me.wallRunning,
+      grappleActive: ga, grappleAnchor: ga ? { x: r3(me.grappleAnchor.x), y: r3(me.grappleAnchor.y), z: r3(me.grappleAnchor.z) } : null,
+      ragdoll: awaiting,
     });
-    stepWorld(ctx);                                       // one step so the query structures see every new position
   }
-  placeAll();
 
-  window.addEventListener('keydown', (e) => {
-    if (e.repeat) return;
-    if (e.code === 'KeyG') setSandbox(!sandbox);                        // TAG MATCH <-> SANDBOX
-    if (e.code === 'KeyR') forceFall[0] = true;                         // "I am stuck": handled exactly like a fall
-    if (e.code === 'Enter' && gs.mode === 'matchend') wantRestart = true;
+  // ---- remote players ----------------------------------------------------------------------------------------------------------
+  function getPuppet(color) {
+    const pool = puppetPool.get(color);
+    return pool && pool.length ? pool.pop() : view.addPuppet(color);
+  }
+  function freeSlot() { for (let i = 1; i < TETHER_SLOTS; i++) if (!slotUsed[i]) { slotUsed[i] = true; return i; } return -1; }
+
+  function addRemote(p) {
+    if (remotes.has(p.id)) return;
+    const r = {
+      id: p.id, name: p.name, color: p.color, ko: p.ko | 0, ping: p.ping | 0,
+      puppet: getPuppet(p.color), slot: freeSlot(),
+      cur: { x: p.x, y: p.y, z: p.z, yaw: p.yaw, height: p.height || m(PUPPET.height) },
+      tgt: { x: p.x, y: p.y, z: p.z, yaw: p.yaw, height: p.height || m(PUPPET.height) },
+      vel: { x: 0, y: 0, z: 0 }, grappleActive: false, anchor: null, ragdoll: false, rag: null,
+      torso: { x: 0, y: 0, z: 0 }, tp: { x: 0, y: 0, z: 0 },
+    };
+    remotes.set(p.id, r);
+    applyRemote(r, p);
+  }
+  function killRemoteRag(r) {
+    if (r.rag) { despawnRagdoll(ctx.world, r.rag); r.rag = null; }
+  }
+  function removeRemote(id) {
+    const r = remotes.get(id);
+    if (!r) return;
+    killRemoteRag(r);
+    r.puppet.showRagdoll(false); r.puppet.showCapsule(false);
+    if (!puppetPool.has(r.color)) puppetPool.set(r.color, []);
+    puppetPool.get(r.color).push(r.puppet);
+    if (r.slot > 0) { view.setGrapple(r.slot, null); slotUsed[r.slot] = false; }
+    remotes.delete(id);
+  }
+  function clearRemotes() { for (const id of [...remotes.keys()]) removeRemote(id); }
+
+  function applyRemote(r, d) {                              // d: a player record (join / snapshot entry)
+    const t = r.tgt;
+    t.x = d.x; t.y = d.y; t.z = d.z; t.yaw = d.yaw; t.height = d.height || t.height;
+    r.vel.x = d.vx; r.vel.y = d.vy; r.vel.z = d.vz;
+    r.grappleActive = !!d.grappleActive; r.anchor = d.grappleAnchor || null;
+    if (d.ko !== undefined) r.ko = d.ko | 0;
+    if (d.ping !== undefined) r.ping = d.ping | 0;
+    const flag = !!d.ragdoll;
+    if (flag && !r.ragdoll) {                               // just fell: tumble where they fell
+      r.ragdoll = true;
+      Object.assign(r.cur, t);
+      killRemoteRag(r);
+      r.rag = spawnRag({ x: t.x, y: t.y, z: t.z }, { x: r.vel.x, y: Math.min(r.vel.y, 0), z: r.vel.z }, t.yaw);
+    } else if (!flag && r.ragdoll) {                        // respawned: drop the ragdoll, snap to the new spawn
+      r.ragdoll = false;
+      killRemoteRag(r);
+      Object.assign(r.cur, t);
+    }
+  }
+
+  function updateRemote(r, k) {
+    const c = r.cur, t = r.tgt, dx = t.x - c.x, dy = t.y - c.y, dz = t.z - c.z;
+    if (dx * dx + dy * dy + dz * dz > SNAP_DIST * SNAP_DIST) { c.x = t.x; c.y = t.y; c.z = t.z; c.yaw = t.yaw; c.height = t.height; }
+    else {
+      c.x += dx * k; c.y += dy * k; c.z += dz * k;
+      c.yaw += angDiff(c.yaw, t.yaw) * k;
+      c.height += (t.height - c.height) * k;
+    }
+    const pu = r.puppet;
+    if (r.rag) { syncRagdollMeshes(r.rag, pu.parts, r.torso); pu.showRagdoll(true); pu.showCapsule(false); }
+    else {
+      pu.setFeet(c.x, c.y, c.z); pu.setHeight(c.height);
+      if (pu.setYaw) pu.setYaw(c.yaw);
+      pu.showRagdoll(false); pu.showCapsule(true);
+    }
+    if (r.slot > 0) {                                       // floating grapple tether
+      if (r.grappleActive && r.anchor && !r.rag) {
+        r.tp.x = c.x; r.tp.y = c.y + c.height * GRAPPLE.torso; r.tp.z = c.z;
+        view.setGrapple(r.slot, r.tp, r.anchor);
+      } else view.setGrapple(r.slot, null);
+    }
+  }
+
+  // ---- socket events -------------------------------------------------------------------------------------------------------------
+  function syncClock() {                                    // one round trip: gives RTT and the server clock offset
+    if (!socket.connected) return;
+    const t0 = performance.now();
+    socket.timeout(3000).emit('timeSync', (err, serverTime) => {
+      if (err) return;
+      const rtt = performance.now() - t0;
+      ping = ping ? ping * 0.7 + rtt * 0.3 : rtt;
+      if (rtt <= bestRtt * 1.5 + 5) { bestRtt = Math.min(bestRtt, rtt); clockOffset = serverTime + rtt / 2 - Date.now(); }   // trust the quickest trips
+      socket.volatile.emit('ping', Math.round(ping));
+    });
+  }
+  setInterval(syncClock, 2000);
+
+  function sendJoin() { socket.emit('join', { name: myName, color: myColor }); }
+  function setMsg(t) { el.msg.textContent = t || ''; }
+  let joinTimer = 0;
+
+  socket.on('connect', () => {
+    bestRtt = Infinity;
+    for (let k = 0; k < 5; k++) setTimeout(syncClock, k * 250);        // quick burst so the offset is good before the first snapshot
+    el.netWarn.style.display = 'none';
+    if (wantJoin) sendJoin();                                          // first Play click, or an automatic re-join after a reconnect
   });
-  let wantRestart = false;
+  socket.on('disconnect', () => { el.netWarn.style.display = joined ? 'block' : 'none'; });
+  socket.on('connect_error', () => { if (!joined && wantJoin) setMsg('Cannot reach the server, retrying...'); });
+  socket.on('full', ({ max }) => {
+    wantJoin = false; clearTimeout(joinTimer);
+    el.play.disabled = false; el.play.textContent = 'PLAY'; setMsg('Room is full (' + max + ' players).');
+  });
+  socket.on('init', ({ id, spawn, players, serverTime }) => {
+    clearTimeout(joinTimer);
+    myId = id;
+    clockOffset = serverTime - Date.now();                             // rough until the timeSync samples refine it
+    clearRemotes();
+    for (const p of players) if (p.id !== id) addRemote(p);
+    if (!localPuppet) localPuppet = view.addPuppet(myColor);
+    joined = true; lastSnapT = 0; myKo = 0;
+    applyRespawn(spawn);
+    el.overlay.style.display = 'none'; setMsg('');
+    clearInput(true);
+    toast('Welcome, ' + myName + '!', 2);
+  });
+  socket.on('playerJoined', (p) => { if (joined && p.id !== myId) { addRemote(p); toast(p.name + ' joined', 1.6); } });
+  socket.on('playerLeft', (id) => {
+    const r = remotes.get(id);
+    if (r) { toast(r.name + ' left', 1.6); removeRemote(id); }
+  });
+  socket.on('snapshot', (s) => {
+    if (!joined || !s || !Array.isArray(s.players)) return;
+    if (s.t && s.t < lastSnapT) return;                                // drop out-of-order snapshots
+    if (s.t) lastSnapT = s.t;
+    for (const d of s.players) {
+      if (d.id === myId) { myKo = d.ko | 0; continue; }
+      const r = remotes.get(d.id);
+      if (r) applyRemote(r, d);
+    }
+  });
+  socket.on('respawn', ({ spawn }) => { if (joined && awaiting) applyRespawn(spawn); });
 
-  // ---- sandbox / free-roam ---------------------------------------------------------------------------------------------------
-  // SANDBOX: the 5 bots are parked off the map (limbo = PARK, never stepped), stepGameRules is not run at all (no tags, timer,
-  // countdown or round-end), gs.mode stays 'play' and nobody is IT. R / falling = instant teleport to your spawn, no ragdoll, no penalty.
-  function sandboxRespawn() {
-    const sp = spawnsM[0];
-    killRagdoll(0);
-    placePlayer(views[0], sp.x, sp.y || 0, sp.z, false);
-    states[0] = createPlayerState();                      // momentum, cooldowns, chains, grapple: all fresh for the next line
-    limbo[0] = 0; forceFall[0] = false;
-    faceCenter(0);
+  // ---- join overlay ----------------------------------------------------------------------------------------------------------------
+  try { el.name.value = localStorage.getItem('pf3d.name') || ''; } catch (e) { /* storage blocked */ }
+  try { el.color.value = localStorage.getItem('pf3d.color') || '#' + Math.floor(0x404040 + Math.random() * 0xa0a0a0).toString(16).padStart(6, '0'); } catch (e) { /* ignore */ }
+
+  function play() {
+    if (el.play.disabled) return;
+    myName = el.name.value.trim().slice(0, 16) || 'Player';
+    myColor = parseInt(el.color.value.slice(1), 16);
+    if (!Number.isInteger(myColor)) myColor = 0x5ee6ff;
+    try { localStorage.setItem('pf3d.name', el.name.value.trim()); localStorage.setItem('pf3d.color', el.color.value); } catch (e) { /* ignore */ }
+    el.play.disabled = true; el.play.textContent = 'JOINING...'; setMsg('');
+    try { const p = canvas.requestPointerLock(); if (p && p.catch) p.catch(() => {}); } catch (e) { /* ignore */ }   // must run inside the click / key gesture
+    wantJoin = true;
+    if (socket.connected) sendJoin();
+    clearTimeout(joinTimer);
+    joinTimer = setTimeout(() => {
+      if (joined) return;
+      el.play.disabled = false; el.play.textContent = 'PLAY'; setMsg('No answer from the server. Try again.');
+    }, 10000);
   }
-  function setSandbox(on) {
-    if (on === sandbox) return;
-    sandbox = on;
-    if (on) {
-      for (let i = 1; i < N; i++) {
-        killRagdoll(i); states[i] = createPlayerState();
-        placePlayer(views[i], PARK_POS.x, PARK_POS.y, PARK_POS.z, false);
-        limbo[i] = PARK; forceFall[i] = false;
-      }
-      gs.mode = 'play'; gs.players.forEach((p) => { p.isIt = false; p.stun = 0; });
-      sandboxRespawn();
-      stepWorld(ctx);
-    } else {
-      limbo.fill(0);
-      startMatch(gs, spawnsM); lastRound = gs.round; placeAll();   // fresh match: bots back, scores 0, countdown
-    }
-    try {                                                  // keep ?sandbox=1 in the URL in sync (reload keeps the mode)
-      const u = new URL(location.href);
-      if (on) u.searchParams.set('sandbox', '1'); else u.searchParams.delete('sandbox');
-      history.replaceState(null, '', u);
-    } catch (e) { /* ignore */ }
-    if (el.toast) { el.toast.textContent = on ? 'SANDBOX: solo free-roam, R = instant respawn' : 'TAG MATCH: 6 players'; toastT = 1.8; }
-  }
+  el.play.addEventListener('click', play);
+  el.name.addEventListener('keydown', (e) => { if (e.code === 'Enter') play(); });
 
-  // ---- bots ----------------------------------------------------------------------------------------------------------------
-  // Lightweight steering, no pathfinding. IT bot: run at the nearest runner (leading its movement a little), hop now and then,
-  // dash / jump when close. Runner bot: run directly away from IT with a weave, dash when IT is close (a dash shoves IT away).
-  // Both stay off the roof edge and out of the skylights (looking 0.5 s ahead along their velocity) and un-stick themselves.
-  const RX = m(DISTRICT_MAP.rect.hw), RZ = m(DISTRICT_MAP.rect.hd), EDGE = 7, HOLE_MARGIN = 3;
-  const HOLES = DISTRICT_MAP.holes.map((h) => ({ x: m(h.x), z: m(h.z), hw: m(h.hw), hd: m(h.hd) }));
+  // ---- keys: R respawn, Tab scoreboard -------------------------------------------------------------------------------------------
+  let showBoard = false;
+  window.addEventListener('keydown', (e) => {
+    if (typingTarget(e)) return;
+    if (e.code === 'Tab') { e.preventDefault(); if (joined) showBoard = true; }
+    if (e.code === 'KeyR' && !e.repeat && joined && !awaiting) forceFall = true;       // "I am stuck": handled exactly like a fall
+  });
+  window.addEventListener('keyup', (e) => { if (e.code === 'Tab') showBoard = false; });
+  window.addEventListener('blur', () => { showBoard = false; });
 
-  function botInput(gs, idx) {
-    const me = gs.players[idx], s = states[idx], b = brains[idx];
-    const inp = { ax: 0, az: 0, moving: false, fwd: false, jump: false, dash: false, slide: false };
-    let wx = 0, wz = 0, near = Infinity, dashRange = 0;
-
-    if (me.isIt) {
-      let tgt = null;
-      for (const q of gs.players) {
-        if (q === me || q.y < -50) continue;              // skip downed players
-        const d = Math.hypot(q.x - me.x, q.z - me.z);
-        if (d < near) { near = d; tgt = q; }
-      }
-      if (tgt) {
-        const lead = Math.min(0.4, near / 20);
-        const tx = tgt.x + tgt.vx * lead - me.x, tz = tgt.z + tgt.vz * lead - me.z, l = Math.hypot(tx, tz) || 1;
-        wx = tx / l; wz = tz / l; dashRange = 5.5;
-      }
-    } else {
-      const it = gs.players.find((q) => q.isIt && q.y > -50);
-      if (it) {
-        const fx = me.x - it.x, fz = me.z - it.z;
-        near = Math.hypot(fx, fz) || 1;
-        const weave = Math.sin(performance.now() * 0.0009 + b.phase) * 0.5;
-        wx = fx / near - (fz / near) * weave;
-        wz = fz / near + (fx / near) * weave;
-        dashRange = 4.2;
-      } else { wx = -me.x * 0.02; wz = -me.z * 0.02; }    // nobody to flee from: drift toward the middle
-    }
-
-    // stay on the roof and out of the skylights (predicted position)
-    const px = me.x + s.vx * 0.5, pz = me.z + s.vz * 0.5;
-    if (px > RX - EDGE) wx -= (px - (RX - EDGE)) / EDGE * 3;
-    if (px < -RX + EDGE) wx += ((-RX + EDGE) - px) / EDGE * 3;
-    if (pz > RZ - EDGE) wz -= (pz - (RZ - EDGE)) / EDGE * 3;
-    if (pz < -RZ + EDGE) wz += ((-RZ + EDGE) - pz) / EDGE * 3;
-    for (const h of HOLES) {
-      const ox = Math.abs(px - h.x) - h.hw, oz = Math.abs(pz - h.z) - h.hd;     // distance outside the hole rectangle
-      const out = Math.max(ox, oz);
-      if (out < HOLE_MARGIN) {
-        const d = Math.hypot(px - h.x, pz - h.z) || 1, k = 3 * (1 - out / HOLE_MARGIN);
-        wx += (px - h.x) / d * k; wz += (pz - h.z) / d * k;
-      }
-    }
-
-    // stuck? (barely moved in 0.5 s while it should be running): strafe sideways and hop
-    b.t += STEP;
-    if (b.t >= 0.5) {
-      if (Math.hypot(me.x - b.px, me.z - b.pz) < 0.8) { b.stuck = 0.7; b.hop = true; b.side = gs.rng() < 0.5 ? -1 : 1; }
-      b.t = 0; b.px = me.x; b.pz = me.z;
-    }
-    if (b.stuck > 0) {
-      b.stuck -= STEP;
-      const tx = wx, tz = wz;
-      wx = -tz * b.side + tx * 0.2; wz = tx * b.side + tz * 0.2;
-    }
-
-    // jump: an occasional hop (keeps the b-hop / air-strafe feel) and one when stuck or the other player is right there
-    b.jumpT -= STEP;
-    if (b.hop) { inp.jump = true; b.hop = false; }
-    else if (b.jumpT <= 0) { inp.jump = near < 12 || gs.rng() < 0.5; b.jumpT = 1.2 + gs.rng() * 1.8; }
-
-    const l = Math.hypot(wx, wz);
-    if (l > 1e-4) { inp.ax = wx / l; inp.az = wz / l; inp.moving = true; inp.fwd = true; }
-
-    // dash when close (needs a direction; the dash locks it)
-    b.dashDelay -= STEP;
-    if (inp.moving && near < dashRange && s.dashCd <= 0 && s.dashT <= 0 && b.dashDelay <= 0) {
-      inp.dash = true; b.dashDelay = 0.2 + gs.rng() * 0.5;
-    }
-    return inp;
-  }
-
-  // ---- grapple aim: from the camera eye along the camera look direction (the crosshair). Downed players cannot be hooked.
+  // ---- grapple aim: from the camera eye along the camera look direction (the crosshair) ----------------------------------------------
   const _eye = new THREE.Vector3(), _look = new THREE.Vector3();
   function aimFromCamera() {
     view.camera.getWorldPosition(_eye); view.camera.getWorldDirection(_look);
-    return { origin: { x: _eye.x, y: _eye.y, z: _eye.z }, dir: { x: _look.x, y: _look.y, z: _look.z },
-             owner: 0, skip: (k) => limbo[k] > 0 || gs.players[k].y < -50 };
+    return { origin: { x: _eye.x, y: _eye.y, z: _eye.z }, dir: { x: _look.x, y: _look.y, z: _look.z }, owner: 0, skip: () => false };
   }
 
-  // ---- one fixed simulation tick --------------------------------------------------------------------------------------------
+  // ---- one fixed simulation tick (your player only) ----------------------------------------------------------------------------------
   function tick() {
-    if (wantRestart) {                                    // Enter after the match: new match, scores to 0
-      wantRestart = false;
-      startMatch(gs, spawnsM); lastRound = gs.round; placeAll();
-    }
+    if (!joined) return;
+    me.locked = awaiting;                                   // ragdolling: skip input (the latches still drain below)
+    const snap = readInput(forwardOf(rig));
+    if (snap.grapple && !awaiting) snap.aim = aimFromCamera();
+    const wasOnGround = pv.player.grounded;
+    stepPlayer(me, snap, pv);
+    for (const e of me.sfx) audio.play(e);
+    if (!awaiting && !wasOnGround && pv.player.grounded && me.vy < 0) triggerLandDip(rig, me.vy);   // me.vy is still the touchdown speed here
 
-    if (sandbox) {                                        // free-roam: always 'play', nobody IT or stunned
-      gs.mode = 'play';
-      for (const q of gs.players) { q.isIt = false; q.stun = 0; }
-    }
-
-    // 1. input + movement for every capsule
-    for (let i = 0; i < N; i++) {
-      if (sandbox && i > 0) continue;                     // parked bots are not simulated
-      const p = gs.players[i], s = states[i];
-      if (limbo[i] > 0) { limbo[i] -= STEP; if (limbo[i] <= 0) { limbo[i] = 0; killRagdoll(i); } }
-      s.isIt = p.isIt;
-      s.locked = gs.mode !== 'play' || p.stun > 0 || limbo[i] > 0;      // stunned: skip input so the knockback plays out
-      if (s.grappleActive && s.grappleTarget >= 0) {       // hooked onto a player: the anchor follows their torso
-        const q = gs.players[s.grappleTarget];
-        if (gs.mode !== 'play' || limbo[s.grappleTarget] > 0) endGrapple(s);
-        else { s.grappleAnchor.x = q.x; s.grappleAnchor.y = q.y + 0.9; s.grappleAnchor.z = q.z; }
-      }
-      let snap;
-      if (i === 0) { snap = readInput(forwardOf(rig)); if (snap.grapple) snap.aim = aimFromCamera(); }
-      else snap = s.locked ? IDLE_INPUT : botInput(gs, i);   // (the human's latches must drain every tick)
-      const wasOnGround = views[i].player.grounded;
-      stepPlayer(s, snap, views[i]);
-      if (i === 0) {                                      // feedback for the human: sounds of this tick, landing dip
-        for (const e of s.sfx) audio.play(e);
-        if (!wasOnGround && views[i].player.grounded && s.vy < 0) triggerLandDip(rig, s.vy);   // s.vy is still the touchdown speed here
-      }
-    }
-
-    // 2. all capsules move
     stepWorld(ctx);
 
-    // 3. capsules -> game state
-    for (let i = 0; i < N; i++) {
-      const p = gs.players[i], s = states[i], v = views[i];
-      let fell = false;
-      if (sandbox && i === 0 && (hasFallen(v) || forceFall[0])) sandboxRespawn();   // R / void: instant, no ragdoll, no fall penalty
-      if (!sandbox && limbo[i] <= 0 && (hasFallen(v) || forceFall[i])) {
-        fell = true; forceFall[i] = false;
-        // ragdoll tumbles where the player fell; the capsule is parked on its spawn point and stays hidden while "down"
-        const f = feetPos(v);
-        startRagdoll(i, f, { x: s.vx, y: Math.min(s.vy, 0), z: s.vz }, { x: s.vx * 0.5, y: 0, z: s.vz * 0.5 }, s.facing);
-        limbo[i] = FALL_DOWN;
-        const sp = gs.spawns[i % gs.spawns.length];
-        placePlayer(v, sp.x, sp.y || 0, sp.z, false);
-        states[i] = createPlayerState(); states[i].isIt = p.isIt; states[i].locked = true;
-        states[i].facing = Math.atan2(-sp.x, -sp.z);
-      }
-      const t = states[i], f = feetPos(v);
-      if (limbo[i] > 0) {                                  // down: invisible to the rules (far below the map, no velocity)
-        p.x = f.x; p.y = LIMBO_Y; p.z = f.z; p.vx = p.vy = p.vz = 0;
-        p.sliding = p.dashing = false; p.fell = fell;
-      } else {
-        p.x = f.x; p.y = f.y; p.z = f.z;
-        p.vx = t.vx; p.vy = t.vy; p.vz = t.vz; p.yaw = t.facing;
-        p.sliding = t.sliding; p.dashing = t.dashT > 0; p.grabbing = false;
-        p.runT = t.runT; p.bhopChain = t.bhopChain; p.fell = false;
-      }
-      const sn = sent[i]; sn.x = p.x; sn.z = p.z; sn.vx = p.vx; sn.vz = p.vz;
-    }
+    if (awaiting) {
+      respawnWait += STEP;
+      if (respawnWait > RESPAWN_FALLBACK) applyRespawn(lastSpawn);     // server silent (offline?): respawn on our own
+    } else if (hasFallen(pv) || forceFall) startFall();               // hasFallen = feet below MAP.fallY
 
-    // 4. tag rules (tags, shoves, trips, soft separation, IT time, rounds)
-    if (!sandbox) stepGameRules(gs, STEP);                // (sandbox: no tags, shoves, trips, separation, timer, rounds)
-
-    // 5. game state -> capsules
-    if (gs.round !== lastRound) {                          // rules started a new round: everybody back on a spawn
-      lastRound = gs.round;
-      placeAll();
-      return;
-    }
-    for (let i = 0; i < N; i++) {                          // a grapple reached another player: shove + brief stun
-      const gh = states[i].grappleHit;
-      if (gh < 0) continue;
-      states[i].grappleHit = -1;
-      const q = gs.players[gh], me = gs.players[i];
-      if (gs.mode !== 'play' || limbo[gh] > 0 || q.stun > 0) continue;
-      const dx = q.x - me.x, dz = q.z - me.z, l = Math.hypot(dx, dz) || 1;
-      const sp = Math.max(m(GRAPPLE.hitShove), Math.hypot(states[i].vx, states[i].vz) * 0.6);
-      q.stun = GRAPPLE.hitStun; q.vx = dx / l * sp; q.vz = dz / l * sp;    // vx / vz change is adopted into the capsule below
-      endGrapple(states[gh]); states[gh].vy = Math.max(states[gh].vy, 2);
-      el.toast.textContent = pname(i) + ' snagged ' + pname(gh); toastT = 1.6;
-    }
-    for (let i = 0; i < N; i++) {
-      if (limbo[i] > 0) continue;
-      const p = gs.players[i], s = states[i], sn = sent[i];
-      if (p.vx !== sn.vx || p.vz !== sn.vz) {              // the rules knocked this player (tag / shove / trip)
-        s.vx = p.vx; s.vz = p.vz; s.runT = p.runT; s.bhopChain = p.bhopChain;
-        s.dashT = 0; s.sliding = false;
-      }
-      const dx = p.x - sn.x, dz = p.z - sn.z;              // soft separation from collidePlayers: read back into the capsule
-      if (dx * dx + dz * dz > 1e-10) nudgePlayer(views[i], dx, dz);
-
-      if (p.stun > 0) {                                    // stunned: cosmetic ragdoll (the capsule stays the truth, hidden)
-        if (!rags[i]) startRagdoll(i, { x: p.x, y: p.y, z: p.z }, { x: s.vx, y: Math.max(s.vy, 0) + 2, z: s.vz },
-                                   { x: s.vx * 1.5, y: 4, z: s.vz * 1.5 }, s.facing);
-      } else if (rags[i]) killRagdoll(i);                  // stun over: capsule is back
-    }
+    if ((++tickN) % SEND_EVERY === 0) sendState();
   }
 
-  // ---- HUD ----------------------------------------------------------------------------------------------------------------------
-  const el = { hud: $('hud'), round: $('round'), timer: $('timer'), status: $('status'), board: $('board'),
-               banner: $('banner'), bMain: $('bannerMain'), bSub: $('bannerSub'), toast: $('toast'),
-               mTag: $('modeTag'), mSand: $('modeSandbox') };
-  const hex = (c) => '#' + c.toString(16).padStart(6, '0');
-  const fmt = (t) => { t = Math.max(0, Math.ceil(t)); return Math.floor(t / 60) + ':' + String(t % 60).padStart(2, '0'); };
-  const pname = (id) => (gs.players[id] ? gs.players[id].name : '?');
-  let flashGo = 0, toastT = 0, boardT = 0, lastBoard = '';
-
-  function handleEvents() {
-    for (const e of drainEvents(gs)) {
-      if (e.type === 'go') flashGo = 0.9;
-      else if (e.type === 'tag') { el.toast.textContent = pname(e.from) + ' tagged ' + pname(e.to); toastT = 1.6; }
-      else if (e.type === 'shove') { el.toast.textContent = pname(e.from) + ' shoved ' + pname(e.to) + ' away'; toastT = 1.6; }
-      else if (e.type === 'trip') { el.toast.textContent = pname(e.from) + ' tripped ' + pname(e.to); toastT = 1.6; }
-      else if (e.type === 'fell') { el.toast.textContent = pname(e.id) + ' fell off and is IT!'; toastT = 1.8; }
-    }
+  // ---- HUD ------------------------------------------------------------------------------------------------------------------------
+  let netT = 0, boardT = 0, xhairText = '';
+  function renderBoard() {
+    const rows = [{ name: myName, color: myColor, ko: myKo, ping: Math.round(ping), me: true }];
+    for (const r of remotes.values()) rows.push({ name: r.name, color: r.color, ko: r.ko, ping: r.ping, me: false });
+    rows.sort((a, b) => b.ko - a.ko || a.name.localeCompare(b.name));
+    el.sbRows.replaceChildren(...rows.map((p) => {
+      const row = document.createElement('div'); row.className = 'row' + (p.me ? ' me' : '');
+      const nm = document.createElement('span'); nm.className = 'nm';
+      const sw = document.createElement('span'); sw.className = 'sw'; sw.style.background = '#' + p.color.toString(16).padStart(6, '0');
+      const label = document.createElement('span'); label.textContent = p.name;
+      nm.append(sw, label);
+      const ko = document.createElement('span'); ko.className = 'n'; ko.textContent = String(p.ko);
+      const pg = document.createElement('span'); pg.className = 'n'; pg.textContent = p.ping ? p.ping + ' ms' : '-';
+      row.append(nm, ko, pg);
+      return row;
+    }));
   }
-
-  function updateHud(dt) {
-    const me = gs.players[0];
-    handleEvents();
-    if (el.mTag) { el.mTag.className = sandbox ? '' : 'on'; el.mSand.className = sandbox ? 'on' : ''; }
-    if (sandbox) {                                        // free-roam: no round / timer / IT status / leaderboard / banners
-      el.round.textContent = 'SANDBOX'; el.timer.textContent = ''; el.timer.className = '';
-      el.status.textContent = 'FREE ROAM'; el.status.className = 'run';
-      el.board.style.display = 'none'; el.banner.style.display = 'none';
-      toastT = Math.max(0, toastT - dt);
-      if (toastT <= 0 && el.toast.textContent) el.toast.textContent = '';
-      return;
-    }
-    el.board.style.display = '';
-    el.round.textContent = 'ROUND ' + gs.round;
-    const tl = gs.mode === 'play' ? gs.timeLeft : gs.mode === 'countdown' ? gs.roundTime : 0;
-    el.timer.textContent = fmt(tl);
-    el.timer.className = gs.mode === 'play' && gs.timeLeft <= 10 ? 'low' : '';
-    el.status.textContent = me.isIt ? 'TAG THEM!' : 'RUN!';
-    el.status.className = me.isIt ? 'it' : 'run';
-
-    // live leaderboard: least IT time first (lowest IT time wins the round); refreshed ~7x / s
-    boardT -= dt;
-    if (boardT <= 0) {
-      boardT = 0.14;
-      const rows = gs.players.slice().sort((a, b) => a.itTime - b.itTime || a.id - b.id);
-      const html = '<div class="head">IT TIME (LOW WINS)</div>' + rows.map((p) =>
-        '<div class="row' + (p.id === 0 ? ' me' : '') + '"><span class="sw" style="background:' + hex(p.color) + '"></span>' +
-        '<span class="nm">' + p.name + '</span><span class="itb">' + (p.isIt ? '&#9660;' : '') + '</span>' +
-        '<span class="tm">' + p.itTime.toFixed(1) + 's</span><span class="st">' + (p.score ? '&#9733;' + p.score : '') + '</span></div>').join('');
-      if (html !== lastBoard) { el.board.innerHTML = html; lastBoard = html; }
-    }
-
-    // banner: countdown number, GO!, round winner, match winner
-    let main = '', sub = '', win = false;
-    if (gs.mode === 'countdown') { main = String(Math.max(1, Math.ceil(gs.countdownLeft))); sub = me.isIt ? 'YOU ARE IT' : 'RUN!'; }
-    else if (gs.mode === 'play' && flashGo > 0) main = 'GO!';
-    else if (gs.mode === 'roundend') { main = pname(gs.winner) + ' WINS ROUND ' + gs.round; sub = 'next round in ' + Math.max(1, Math.ceil(gs.roundEndLeft)); win = true; }
-    else if (gs.mode === 'matchend') { main = pname(gs.winner) + ' WINS THE MATCH'; sub = 'press Enter to play again'; win = true; }
-    flashGo = Math.max(0, flashGo - dt);
-    el.banner.style.display = main ? 'block' : 'none';
-    el.banner.className = 'hud' + (win ? ' win' : '');
-    el.bMain.textContent = main; el.bSub.textContent = sub;
-
+  function updateHud(dt, hSpeed) {
     toastT = Math.max(0, toastT - dt);
     if (toastT <= 0 && el.toast.textContent) el.toast.textContent = '';
+    el.resume.style.display = joined && !document.pointerLockElement ? 'block' : 'none';
+
+    netT -= dt;
+    if (netT <= 0) {
+      netT = 0.25;
+      el.net.textContent = joined ? 'PLAYERS ' + (remotes.size + 1) + '   PING ' + Math.round(ping) + ' ms' : '';
+    }
+    el.sb.style.display = showBoard && joined ? 'block' : 'none';
+    if (showBoard) { boardT -= dt; if (boardT <= 0) { boardT = 0.25; renderBoard(); } } else boardT = 0;
+
+    const hs = me;
+    el.hud.textContent = !joined ? '' : 'spd ' + Math.round(hSpeed / SCALE) + '  runT ' + hs.runT.toFixed(2) + ' / ' + RUN.rampT +
+      '  BHOP ' + (hs.bhopChain > 0 ? 'x' + hs.bhopChain : '-') + (hs.bhopTimer > 0 ? ' (window)' : '') +
+      '  DASH ' + (hs.dashT > 0 ? 'GO' : hs.dashCd > 0 ? hs.dashCd.toFixed(1) + 's' : 'ready') +
+      '  AIRJ ' + hs.airJumpsLeft +
+      '  GRAPPLE ' + (hs.grappleActive ? 'GO' : hs.grappleCd > 0 ? hs.grappleCd.toFixed(1) + 's' : 'ready') +
+      (hs.wallRunning ? '  WALLRUN' : hs.regrabTimer > 0 ? '  regrab ' + hs.regrabTimer.toFixed(2) + 's' : '') +
+      (hs.sliding ? '  SLIDE' : '') + (hs.slideBoostCd > 0 ? '  slideboost ' + hs.slideBoostCd.toFixed(2) + 's' : '  slideboost ready');
+
+    const gtxt = !joined ? '' : hs.grappleActive ? 'HOOKED' : hs.grappleCd > 0 ? 'GRAPPLE ' + hs.grappleCd.toFixed(1) + 's' : 'GRAPPLE READY';
+    if (gtxt !== xhairText) {
+      xhairText = gtxt; el.gstat.textContent = gtxt;
+      el.xhair.style.background = hs.grappleActive ? '#7fe9ff' : hs.grappleCd > 0 ? '#ff6b6b' : '#fff';
+    }
   }
 
-  // ---- render loop: accumulate real time, run whole ticks, then draw ---------------------------------------------------------------
+  // ---- render loop: accumulate real time, run whole ticks, then draw -----------------------------------------------------------------
   let acc = 0, last = performance.now();
   function frame(now) {
     const dt = Math.min(0.1, (now - last) / 1000);
@@ -505,69 +463,34 @@ async function boot() {
     while (acc >= STEP && n < MAX_STEPS_PER_FRAME) { tick(); acc -= STEP; n++; }
     if (n >= MAX_STEPS_PER_FRAME) acc = 0;
 
-    // puppets: ragdoll parts while ragdolling, otherwise the capsule (squashed to the collider height)
-    for (let i = 0; i < N; i++) {
-      const pu = puppets[i];
-      if (rags[i]) {
-        syncRagdollMeshes(rags[i], pu.parts, torso[i]);
-        pu.showRagdoll(true); pu.showCapsule(false);
-      } else {
-        const f = feetPos(views[i]);
-        pu.setFeet(f.x, f.y, f.z);
-        pu.setHeight(states[i].height);
-        pu.showRagdoll(false); pu.showCapsule(limbo[i] <= 0);
-      }
+    // your puppet: ragdoll while down, otherwise the capsule squashed to the collider height
+    if (joined && localPuppet) {
+      if (localRag) { syncRagdollMeshes(localRag, localPuppet.parts, localTorso); localPuppet.showRagdoll(true); localPuppet.showCapsule(false); }
+      else { const f = feetPos(pv); localPuppet.setFeet(f.x, f.y, f.z); localPuppet.setHeight(me.height); localPuppet.showRagdoll(false); localPuppet.showCapsule(!awaiting); }
+      if (me.grappleActive && !awaiting) view.setGrapple(0, torsoPos(pv, me), me.grappleAnchor); else view.setGrapple(0, null);
     }
 
-    // grapple tethers: torso -> anchor while hooked
-    for (let i = 0; i < N; i++) {
-      const gs_ = states[i];
-      if (gs_.grappleActive) view.setGrapple(i, torsoPos(views[i], gs_), gs_.grappleAnchor);
-      else view.setGrapple(i, null);
-    }
+    // everybody else: exponential smoothing toward the latest snapshot
+    const k = 1 - Math.exp(-SMOOTH * dt);
+    for (const r of remotes.values()) updateRemote(r, k);
 
-    // the red cone over whoever is IT
-    const itIdx = gs.players.findIndex((p) => p.isIt);
-    if (itIdx < 0) view.setItMarker(null);
-    else if (rags[itIdx]) view.setItMarker({ x: torso[itIdx].x, y: torso[itIdx].y + 0.95, z: torso[itIdx].z }, now / 1000);
-    else {
-      const f = feetPos(views[itIdx]);
-      view.setItMarker({ x: f.x, y: f.y + states[itIdx].height + 0.55, z: f.z }, now / 1000);
-    }
-
-    // chase camera: your capsule, or your tumbling torso while you are the one ragdolling
-    const hs = states[0], hv = views[0];
-    const hSpeed = Math.hypot(hs.vx, hs.vz);
+    // chase camera: your capsule, or your tumbling torso while you are down
+    const hv = pv, hSpeed = Math.hypot(me.vx, me.vz);
     let focus;
-    if (rags[0]) {
-      focus = torso[0];
+    if (localRag) {
+      focus = localTorso;
       updateCamera(rig, view.camera, hv, focus, dt, 0.15, 0, 0);
     } else {
       focus = feetPos(hv);
-      updateCamera(rig, view.camera, hv, focus, dt, m(CAM.pivot) * hs.height / m(PUPPET.height), hSpeed, hs.wallRunning ? hs.wallSide : 0);
+      updateCamera(rig, view.camera, hv, focus, dt, m(CAM.pivot) * me.height / m(PUPPET.height), hSpeed, me.wallRunning ? me.wallSide : 0);
     }
     view.setFocus(focus);
-    audio.setMotion(hSpeed / SCALE, hs.sliding && hv.player.grounded && !rags[0]);   // slide hiss + high-speed wind (loops follow the speed)
-
-    if (el.hud) el.hud.textContent = 'spd ' + Math.round(hSpeed / SCALE) + '  runT ' + hs.runT.toFixed(2) + ' / ' + RUN.rampT +
-      '  BHOP ' + (hs.bhopChain > 0 ? 'x' + hs.bhopChain : '-') + (hs.bhopTimer > 0 ? ' (window)' : '') +
-      '  DASH ' + (hs.dashT > 0 ? 'GO' : hs.dashCd > 0 ? hs.dashCd.toFixed(1) + 's' : 'ready') +
-      '  AIRJ ' + hs.airJumpsLeft +
-      '  GRAPPLE ' + (hs.grappleActive ? 'GO' : hs.grappleCd > 0 ? hs.grappleCd.toFixed(1) + 's' : 'ready') +
-      (hs.wallRunning ? '  WALLRUN' : hs.regrabTimer > 0 ? '  regrab ' + hs.regrabTimer.toFixed(2) + 's' : '') +
-      (hs.sliding ? '  SLIDE' : '') + (hs.slideBoostCd > 0 ? '  slideboost ' + hs.slideBoostCd.toFixed(2) + 's' : '  slideboost ready') + (gs.players[0].stun > 0 ? '  STUN' : '');
-    updateHud(dt);
-
-    const gtxt = hs.grappleActive ? 'HOOKED' : hs.grappleCd > 0 ? 'GRAPPLE ' + hs.grappleCd.toFixed(1) + 's' : 'GRAPPLE READY';
-    if (gtxt !== xhairText) {
-      xhairText = gtxt; xhair.tag.textContent = gtxt;
-      xhair.dot.style.background = hs.grappleActive ? '#7fe9ff' : hs.grappleCd > 0 ? '#ff6b6b' : '#fff';
-    }
+    audio.setMotion(hSpeed / SCALE, me.sliding && hv.player.grounded && !localRag);   // slide hiss + high-speed wind (loops follow the speed)
+    updateHud(dt, hSpeed);
 
     view.renderer.render(view.scene, view.camera);
     requestAnimationFrame(frame);
   }
-  if (new URLSearchParams(location.search).get('sandbox') === '1') setSandbox(true);   // ?sandbox=1: start in free-roam
   requestAnimationFrame(frame);
 }
 
