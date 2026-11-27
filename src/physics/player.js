@@ -8,8 +8,13 @@
 // Loads after: config.js, physics/world.js
 // Speeds in `state` are in METRES / s (already scaled); config numbers are in old units and go through m().
 
+// MAX_FLOW_SPEED (below) is the soft aerodynamic ceiling on horizontal speed.
 import { STEP, m, PUPPET, RUN, MOVE, JUMP, BHOP, DASH, SLIDE, WALLRUN, GRAPPLE } from '../config.js';
 import { movePlayer, hasHeadroom, detectWall, groundGap, raycastGrapple, feetPos } from './world.js';
+
+// Soft aerodynamic speed ceiling, old units / s (Titanfall 2 "flow" zone). Horizontal speed above it bleeds back toward it
+// (see the end of the horizontal section in stepPlayer), so grapple slingshots and b-hop chains top out around 760 instead of running away.
+const MAX_FLOW_SPEED = 760;
 
 // Input snapshot with nothing pressed (used while a player is locked).
 export const IDLE_INPUT = Object.freeze({ ax: 0, az: 0, moving: false, fwd: false, jump: false, dash: false, slide: false, grapple: false });
@@ -141,6 +146,7 @@ export function stepPlayer(s, inp, ctx) {
   }
 
   // ---- wall-run detection: in the air, holding W, fast enough, with a wall beside us that is not the one we just kicked off
+  const wasWallRunning = s.wallRunning;                       // (an ATTACH is a tick that wall-runs after one that did not)
   s.wallRunning = false;
   const hs = Math.hypot(s.vx, s.vz);
   if (!grounded && !grappling && inp.fwd && s.dashT <= 0 && s.airT >= WALLRUN.minAir && hs > m(WALLRUN.minSpeed)) {
@@ -152,6 +158,7 @@ export function stepPlayer(s, inp, ctx) {
       if (Math.abs(s.vx * tx + s.vz * tz) / hs >= WALLRUN.minTangent) {
         s.wallRunning = true; s.wallSide = w.side; s.wallN = w.normal; s.wallT = { x: tx, z: tz };
         s.airJumpsLeft = JUMP.maxAirJumps;                    // catching a wall refills the air jump
+        if (!wasWallRunning && s.vy < 0) s.vy = m(WALLRUN.entryUp);   // entry pop: a falling catch is lifted, so the run reaches the end of the wall
       }
     }
   }
@@ -259,6 +266,15 @@ export function stepPlayer(s, inp, ctx) {
     }
   } else if (inp.moving && !airJumped) {                      // air (and the takeoff tick): Quake air-strafe, no drag.
     airAccelerate(s, inp.ax, inp.az, sp);                     // (the air-jump tick skips it, so the snap-turn keeps its speed)
+  }
+
+  // ---- soft speed ceiling: the horizontal excess over MAX_FLOW_SPEED bleeds off smoothly (never a hard clamp, never below the ceiling)
+  {
+    const v = Math.hypot(s.vx, s.vz), cap = m(MAX_FLOW_SPEED);
+    if (v > cap) {
+      const nv = v + (cap - v) * Math.min(1, STEP * 3.5);
+      s.vx *= nv / v; s.vz *= nv / v;
+    }
   }
 
   // ---- vertical: stick to the ground, otherwise gravity (light while dashing, heavier on the way down than up)
