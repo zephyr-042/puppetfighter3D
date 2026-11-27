@@ -191,12 +191,13 @@ export function raycastStatic(ctx, ox, oy, oz, dx, dy, dz, maxDist) {
 // Look for a wall beside the player. Casts a horizontal ray to the left and one to the right at torso height, out to
 // PUPPET.radius + WALLRUN.detectDist from the body centre, against static geometry only (WALL_GROUP).
 // `yaw` is the travel direction: forward = (sin yaw, cos yaw), right = (-cos yaw, sin yaw) (same handedness as input.js).
+// `extraReach` (old units) is added to WALLRUN.detectDist: player.js passes WALLRUN.stickReach while already wall-running (hysteresis).
 // Returns { hit: false } or { hit: true, side: -1 (left) | 1 (right), normal: {x, z} (unit, pointing away from the wall), dist }.
-export function detectWall(ctx, yaw) {
+export function detectWall(ctx, yaw, extraReach = 0) {
   const { RAPIER, world, player } = ctx, t = player.body.translation();
   const feetY = t.y - player.halfCyl - player.radius;
   const oy = feetY + m(WALLRUN.torso);
-  const reach = player.radius + m(WALLRUN.detectDist);
+  const reach = player.radius + m(WALLRUN.detectDist + extraReach);
   const rx = -Math.cos(yaw), rz = Math.sin(yaw);
   let best = { hit: false };
   for (const side of [-1, 1]) {
