@@ -2,15 +2,15 @@
 // PHYSICS: the player's movement rules as a function of (state, input). Ported verb by verb from the old physics.js.
 // Done so far: progressive momentum run (runT, plain run capped at RUN.max), jump (buffer, coyote time, rise / fall gravity),
 // Quake-style air-strafing (no air drag, no top speed), b-hop landing window, crouch-slide, dash burst, double jump,
-// wall-run + wall-kick, grapple / sticky hand (hold E / right mouse). Coming next: pillar orbit.
+// wall-run + wall-kick, grapple / sticky hand (hold E / right mouse), automatic ledge mantle. Coming next: pillar orbit.
 // One state object per player (6 per match). `state.locked` (set by main.js while stunned, in countdown or round / match end)
 // makes stepPlayer ignore the input snapshot, so knockback plays out under normal gravity / friction with no steering.
 // Loads after: config.js, physics/world.js
 // Speeds in `state` are in METRES / s (already scaled); config numbers are in old units and go through m().
 
 // MAX_FLOW_SPEED (below) is the soft aerodynamic ceiling on horizontal speed.
-import { STEP, m, PUPPET, RUN, MOVE, JUMP, BHOP, DASH, SLIDE, WALLRUN, GRAPPLE } from '../config.js';
-import { movePlayer, hasHeadroom, detectWall, groundGap, raycastGrapple, feetPos } from './world.js';
+import { STEP, m, PUPPET, RUN, MOVE, JUMP, BHOP, DASH, SLIDE, WALLRUN, GRAPPLE, MANTLE } from '../config.js';
+import { movePlayer, hasHeadroom, detectWall, groundGap, raycastGrapple, feetPos, checkLedgeMantle } from './world.js';
 
 // Soft aerodynamic speed ceiling, old units / s (Titanfall 2 "flow" zone). Horizontal speed above it bleeds back toward it
 // (see the end of the horizontal section in stepPlayer), so grapple slingshots and b-hop chains top out around 760 instead of running away.
@@ -28,7 +28,9 @@ export function createPlayerState() {
            wallRunning: false, wallSide: 0, wallN: { x: 0, z: 0 }, wallT: { x: 0, z: 0 },
            regrabTimer: 0, lastWallN: null, wallDropCd: 0,
            grappleActive: false, grappleAnchor: { x: 0, y: 0, z: 0 }, grappleTarget: -1, grappleT: 0, grappleCd: 0, grapplePrev: false,
-           grappleHit: -1 };   // grappleHit: index of a player the hook just reached (main.js consumes it: shove + stun)
+           grappleHit: -1,     // grappleHit: index of a player the hook just reached (main.js consumes it: shove + stun)
+           mantleT: 0,         // s left of the mantle forward-step window (see MANTLE)
+           sfx: [] };          // sound events of THIS tick ('jump' | 'airjump' | 'kick' | 'attach' | 'dash' | 'grapple'); cleared at the start of stepPlayer, read by main.js
 }
 
 // Torso point (metres) where the grapple rope leaves the body and the pull is measured from.
@@ -61,11 +63,12 @@ function updateRunT(s, inp, grounded) {
 // Quake / Source air acceleration. (ax, az) = unit wish direction. Speed is added only while the speed ALONG the wish
 // direction is below the (small) wish cap, so a wish direction that is sideways to the velocity keeps adding speed as the
 // velocity turns; flying straight along it adds nothing. There is no upper limit on the resulting speed.
-function airAccelerate(s, ax, az, wishSpeed) {
-  // air carving: rotate the existing horizontal velocity a small fraction (JUMP.airTurnRate * STEP) of the way toward the wish
-  // direction. A pure rotation, so the horizontal magnitude is preserved (it only aims the speed, it never adds or removes any).
+function airAccelerate(s, ax, az, wishSpeed, carve) {
+  // look-steering / air carving (only while W is held: `carve`): rotate the existing horizontal velocity a small fraction
+  // (JUMP.airTurnRate * STEP) of the way toward the wish direction (camera-relative keys), so aiming the crosshair curves the flight.
+  // A pure rotation, so the horizontal magnitude is preserved (it only aims the speed, it never adds or removes any).
   const v = Math.hypot(s.vx, s.vz);
-  if (v > 1e-3 && JUMP.airTurnRate > 0) {
+  if (carve && v > 1e-3 && JUMP.airTurnRate > 0) {
     const ang = Math.atan2(s.vx * az - s.vz * ax, s.vx * ax + s.vz * az);   // signed angle from velocity to wish (about +y)
     const r = ang * Math.min(1, JUMP.airTurnRate * STEP), cs = Math.cos(r), sn = Math.sin(r);
     const vx = s.vx, vz = s.vz;
@@ -87,6 +90,7 @@ function landingSoon(ctx, s) {
 // One fixed tick. `ctx` is the physics world (movePlayer moves the capsule and reports the result).
 export function stepPlayer(s, inp, ctx) {
   if (s.locked) inp = IDLE_INPUT;                             // stunned / frozen: no steering, jumps, dashes or slides (knockback keeps its velocity)
+  s.sfx.length = 0;                                           // this tick's sound events (main.js plays them right after the step)
   const grounded = ctx.player.grounded;
   // A landing needs a real stretch in the air. Rapier's grounded flag can drop for a single tick while running on flat
   // ground (the resting push into the floor is smaller than the controller's skin), and that must not open a b-hop window.
@@ -117,6 +121,7 @@ export function stepPlayer(s, inp, ctx) {
   let grappling = false, grapJump = false;
   if (!s.grappleActive && inp.grapple && !s.grapplePrev && s.grappleCd <= 0 && s.dashT <= 0 && inp.aim) {
     const r = raycastGrapple(ctx, inp.aim.origin, inp.aim.dir, m(GRAPPLE.maxRange), inp.aim.owner, inp.aim.skip);
+    s.sfx.push('grapple');                                    // the shot is fired whether or not it hits
     if (r.hit) {
       s.grappleActive = true; s.grappleT = 0; s.grappleTarget = r.targetPlayer;
       s.grappleAnchor = { x: r.point.x, y: r.point.y, z: r.point.z };
@@ -167,6 +172,7 @@ export function stepPlayer(s, inp, ctx) {
       }
     }
   }
+  if (s.wallRunning && !wasWallRunning) s.sfx.push('attach');
   // natural drop (the wall ended / was lost, no wall-kick: a kick happens below and leaves wasWallRunning false next tick)
   if (wasWallRunning && !s.wallRunning && !grounded) s.wallDropCd = WALLRUN.dropCd;
 
@@ -182,9 +188,9 @@ export function stepPlayer(s, inp, ctx) {
     s.vz = s.wallT.z * speed + s.wallN.z * m(WALLRUN.kickOut);
     s.regrabTimer = WALLRUN.regrabCd; s.lastWallN = s.wallN;   // must chain to a DIFFERENT wall
     s.jumpBuf = 0; s.coyote = 0; s.bhopTimer = 0; s.dashT = 0;
-    s.wallRunning = false; launched = true;
+    s.wallRunning = false; launched = true; s.sfx.push('kick');
   } else if (s.jumpBuf > 0 && s.coyote > 0) {
-    s.vy = m(JUMP.impulse); s.jumpBuf = 0; s.coyote = 0; jumped = true;
+    s.vy = m(JUMP.impulse); s.jumpBuf = 0; s.coyote = 0; jumped = true; s.sfx.push('jump');
     s.dashT = 0;                                             // jumping out of a dash keeps its speed but frees the steering
     if (s.bhopTimer > 0) {                                   // jumped inside the landing window: b-hop timing bonus
       const v0 = Math.hypot(s.vx, s.vz);
@@ -201,7 +207,7 @@ export function stepPlayer(s, inp, ctx) {
   } else if (s.jumpBuf > 0 && !grounded && s.coyote <= 0 && s.airJumpsLeft > 0 && !landingSoon(ctx, s)) {
     // ---- air jump: coyote time is over, so this press spends an air jump. Crisp push toward the held keys, speed never lost.
     s.vy = m(JUMP.doubleJumpImpulse);
-    s.airJumpsLeft--; s.jumpBuf = 0; s.dashT = 0; launched = true; airJumped = true;
+    s.airJumpsLeft--; s.jumpBuf = 0; s.dashT = 0; launched = true; airJumped = true; s.sfx.push('airjump');
     if (inp.moving) {
       const v0 = Math.hypot(s.vx, s.vz);
       s.vx += inp.ax * m(JUMP.doubleJumpDir); s.vz += inp.az * m(JUMP.doubleJumpDir);
@@ -217,7 +223,7 @@ export function stepPlayer(s, inp, ctx) {
     s.dashX = dx; s.dashZ = dz;
     s.dashSpeed = Math.max(m(DASH.speed), Math.hypot(s.vx, s.vz));
     s.dashT = DASH.duration; s.dashCd = DASH.cooldown;
-    s.sliding = false;
+    s.sliding = false; s.sfx.push('dash');
   }
   const dashing = s.dashT > 0;
   if (dashing) s.wallRunning = false;                         // a dash breaks away from the wall
@@ -252,7 +258,7 @@ export function stepPlayer(s, inp, ctx) {
     s.vx = s.wallT.x * spd - s.wallN.x * pin;
     s.vz = s.wallT.z * spd - s.wallN.z * pin;
   } else if (grappling) {                                     // hooked: the pull owns the velocity, light air steering on top
-    if (inp.moving) airAccelerate(s, inp.ax, inp.az, sp);
+    if (inp.moving) airAccelerate(s, inp.ax, inp.az, sp, inp.fwd);
   } else if (s.sliding && grounded) {
     if (s.bhopTimer <= 0) {                                   // (inside the landing window a slide keeps all its speed)
       const f = Math.pow(SLIDE.friction, STEP);               // glide: low friction, momentum kept
@@ -272,7 +278,7 @@ export function stepPlayer(s, inp, ctx) {
       s.vz += (inp.az * sp - s.vz) * k;
     }
   } else if (inp.moving && !airJumped) {                      // air (and the takeoff tick): Quake air-strafe, no drag.
-    airAccelerate(s, inp.ax, inp.az, sp);                     // (the air-jump tick skips it, so the snap-turn keeps its speed)
+    airAccelerate(s, inp.ax, inp.az, sp, inp.fwd);            // (the air-jump tick skips it, so the snap-turn keeps its speed)
   }
 
   // ---- soft speed ceiling: the horizontal excess over MAX_FLOW_SPEED bleeds off smoothly (never a hard clamp, never below the ceiling)
@@ -307,13 +313,42 @@ export function stepPlayer(s, inp, ctx) {
   // the first two airborne ticks after leaving a surface still count as being on it, which is what covers a ramp crest.
   const onSurface = grounded || s.airT < 0.04;
   const stickDown = (onSurface && !launched && !s.wallRunning && !grappling && s.vy <= 0 && !s.climbing) ? m(MOVE.stick) : 0;
-  const c = movePlayer(ctx, s.vx * STEP, s.vy * STEP - stickDown, s.vz * STEP, h);
+  // mantle forward step: while the window is open (a mantle just triggered) the move also carries a small extra forward DISPLACEMENT, so the
+  // capsule slides over the lip as soon as it clears it. It changes no velocity, so no speed is added or lost.
+  let fwdX = 0, fwdZ = 0;
+  if (s.mantleT > 0) {
+    s.mantleT = Math.max(0, s.mantleT - STEP);
+    const hv = Math.hypot(s.vx, s.vz);
+    if (hv > 1e-3) { fwdX = s.vx / hv * m(MANTLE.forward); fwdZ = s.vz / hv * m(MANTLE.forward); }
+  }
+  const c = movePlayer(ctx, s.vx * STEP + fwdX, s.vy * STEP - stickDown, s.vz * STEP + fwdZ, h);
   s.height = h;
   if (s.vy > 0 && c.y < s.vy * STEP * 0.5) s.vy = 0;        // bonked a ceiling: stop rising
 
   // wall detection: we wanted to cover vx,vz this tick but the controller let us move much less
   const want = Math.hypot(s.vx, s.vz) * STEP, got = Math.hypot(c.x, c.z);
-  s.wallHit = want > m(RUN.wallMinSpeed) * STEP && got < want * RUN.wallRatio;
+
+  // ---- ledge mantle: airborne, moving forward, blocked (got < 70 % of want) and a walkable ledge top lies 12..48 units above the feet
+  // just past the blocking face (checkLedgeMantle) with standing headroom on it: pop up and over. The upward speed is the larger of
+  // MANTLE.popSpeed, the current vy and what it takes to clear the lip, and the HORIZONTAL velocity is left exactly as it was (the blocked-speed
+  // clamp below is skipped), so a wall-kick or grapple release onto a deck / skybridge keeps 100 % of its speed.
+  let mantled = false;
+  if (!ctx.player.grounded && !s.wallRunning && want > m(MANTLE.minSpeed) * STEP && got < want * 0.7) {
+    const lp = checkLedgeMantle(ctx, s.vx, s.vz);
+    if (lp) {
+      mantled = true;
+      const need = lp.rise + m(MANTLE.clear);                 // metres to rise so the feet end up just above the ledge top
+      const clearVy = Math.sqrt(2 * m(JUMP.gravRise) * need) * 1.08;
+      s.vy = Math.max(s.vy, m(MANTLE.popSpeed), clearVy);
+      s.mantleT = MANTLE.window;
+    } else if (s.mantleT > 0) {
+      // mid-mantle: the feet have risen to within minRise of the lip, below the probe's range. Still blocked by that last sliver of lip,
+      // so keep climbing over it with the speed untouched (the window is refreshed by every probe hit and ends 0.18 s after the last one).
+      mantled = true;
+      s.vy = Math.max(s.vy, m(MANTLE.popSpeed));
+    }
+  }
+  s.wallHit = !mantled && want > m(RUN.wallMinSpeed) * STEP && got < want * RUN.wallRatio;
   if (s.wallHit) { s.bhopTimer = 0; if (grounded) s.bhopChain = 0; }   // slamming into a wall ends the b-hop window
   // blocked: the speed into the obstacle is gone. Keep only the motion the controller actually allowed (the slide along
   // the wall), otherwise uncapped air speed would pile up against a wall and shoot out of it later
@@ -321,7 +356,7 @@ export function stepPlayer(s, inp, ctx) {
   // horizontal shortfall went into height, not into a wall. Clamping there would bleed speed every tick on every ramp.)
   const climbed = s.vy <= 0 && c.y > 1e-4;
   s.climbing = climbed;
-  if (want > 1e-6 && got < want * 0.98 && !climbed) { s.vx = c.x / STEP; s.vz = c.z / STEP; }
+  if (want > 1e-6 && got < want * 0.98 && !climbed && !mantled) { s.vx = c.x / STEP; s.vz = c.z / STEP; }
 
   // downhill slide: the move went DOWN (c.y < -1e-4) while grounded, so add slopeAccel along the slide direction (ramps = speed).
   // (-c.y must also beat 2 % of the horizontal travel, which ignores the sub-millimetre jitter of the ground stick on flat floors.)
