@@ -16,26 +16,29 @@
               dir = direction of ASCENT: '+x' | '-x' | '+z' | '-z'. Height is linear along that axis.
    - c: [r, g, b] 0..255 (the hex() helper converts 0xRRGGBB, so the palette below reads like web colours).
 
-   DISTRICT_MAP (this file) is the "Glitch"-inspired Titanfall 2 parkour arena, 3200 x 2400, point-symmetric (x, z) -> (-x, -z):
-     centre  : skylight pit, two floating skybridges (y0 110 .. 130) and two floating orange wall-run billboards (150 .. 330) above them
-     N / S   : staggered cyan wall-run gauntlets (h 230, 230-250 apart face to face) -> gold 16 degree downhill speed ramps
-     E / W   : h110 decks, double ramps, h260 cover, floating ledges (210 .. 230)
-     corners : h380 grapple towers with yellow beacon caps, r34 h280 pillars
+   DISTRICT_MAP (this file) is a bright, spacious DAYTIME rooftop parkour arena, 4800 x 3400 (hw 2400, hd 1700), point-symmetric (x, z) -> (-x, -z).
+   Everything of substance lives inside |x| <= 1950, |z| <= 1250; the 450-wide ring outside that is an open runout avenue (spawns, a clear view over the edge).
+     centre  : skylight pit (hw 640, hd 360) spanned by two floating skybridges (y0 115 .. 135) with two long floating orange wall-run billboards
+               (y0 155 .. 350) above them, open air above and below
+     N / S   : 6 long cyan wall-run walls (950 long, 22 thick, 250 high), staggered over two lanes 380 apart face to face; each chain ends in a gold
+               pad (h118) and a 15 degree downhill speed ramp (wid 360, len 440) pointing out to the avenue (the south chain runs the other way round)
+     E / W   : two wide h110 decks (hw 320, hd 460), one wide access ramp each (0 -> 110), a little low cover, nothing floating
+     corners : 4 h420 grapple spires with gold caps, 4 r40 h300 swing pillars
+     28 boxes in all (was 42): no clutter within 400-600 units of any zone, so nothing gets clipped at 760 units / s.
    ============================================================================ */
 
 function hex(n) { return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
 
 var C = {
-  DECK:   hex(0x3d566e),   // E / W decks
-  COVER:  hex(0x7f8c8d),   // cover blocks on the decks
-  LEDGE:  hex(0x9b59b6),   // floating upper ledges
-  BRIDGE: hex(0xecf0f1),   // central skybridges
-  BILL:   hex(0xe67e22),   // high wall-run billboards (vibrant orange)
-  WALL:   hex(0x3498db),   // gauntlet wall-run panels (cyan-slate)
-  PAD:    hex(0xf39c12),   // launch platforms
-  SPEED:  hex(0xf1c40f),   // downhill speed ramps, tower beacon caps (yellow-gold)
-  TOWER:  hex(0x2c3e50),   // grapple tower shafts
-  PILLAR: hex(0x1abc9c)    // round pillars
+  DECK:   hex(0x5d7a96),   // E / W decks
+  COVER:  hex(0xa9b4b8),   // low cover on the decks
+  BRIDGE: hex(0xf3f6f8),   // central skybridges
+  BILL:   hex(0xff8a1f),   // high wall-run billboards (vibrant orange)
+  WALL:   hex(0x1ec6ea),   // wall-run walls (cyan)
+  PAD:    hex(0xf5b014),   // launch pads at the end of each wall chain
+  SPEED:  hex(0xf1c40f),   // downhill speed ramps, spire caps (yellow-gold)
+  TOWER:  hex(0x34495e),   // grapple spire shafts
+  PILLAR: hex(0x1abc9c)    // round swing pillars
 };
 
 // box(x, z, hw, hd, h, c [, y0]): y0 is stored only when it is above the floor, so legacy boxes stay { x, z, hw, hd, h, c }.
@@ -57,58 +60,56 @@ function addRampSym(x, z, hw, hd, y0, y1, dir) {
   ramps.push({ x: -x, z: -z, hw: hw, hd: hd, y0: y0, y1: y1, dir: OPP[dir] });
 }
 
-/* ---- CENTRE: the pit (hole) is spanned by two true floating skybridges; two billboards float above them ---- */
-addBox(0, -130, 480, 60, 130, C.BRIDGE, 110);     // skybridge N: 120 wide, underside 110 (slide / walk under), top 130, ends touch the decks
-addBox(0,  130, 480, 60, 130, C.BRIDGE, 110);     // skybridge S
-addBox(0, -130, 300, 10, 330, C.BILL, 150);       // billboard N: 20 thick, floats 150 .. 330 above skybridge N
-addBox(0,  130, 300, 10, 330, C.BILL, 150);       // billboard S
+/* ---- CENTRE: the skylight pit is spanned by two floating skybridges; two long orange billboards float above them ----
+   Bridges: 170 deep, underside 115 (slide / walk under), top 135, 780 half length so each end rests on the floor 140 past the pit, touching the deck. */
+addBoxSym(0, -190, 780, 85, 135, C.BRIDGE, 115);     // skybridge N (S is the twin)
+addBoxSym(0, -190, 560, 12, 350, C.BILL, 155);       // billboard N, 24 thick, floats 155 .. 350 over the bridge (S is the twin)
 
-/* ---- NORTH + SOUTH wall-run gauntlets (north built, south is the point-symmetric twin) ----
-   Rows z = -1050 (A), -800 (B), -530 (C). Face-to-face gaps: A-B 230, B-C 250. Segments are 350 long and alternate rows so
-   each panel ends exactly where the opposite row's next panel begins: a wall-kick across the lane reaches it without losing speed. */
-[[-1275, -1050], [-925, -800], [-575, -1050], [-225, -800], [125, -1050], [475, -800],
- [-1275, -530], [-575, -530], [125, -530]].forEach(function (p) { addBoxSym(p[0], p[1], 175, 10, 230, C.WALL); });
+/* ---- NORTH + SOUTH wall-run chains (north built, south is the point-symmetric twin that runs the other way round) ----
+   Two lanes, z = -778 and z = -1180: 402 centre to centre = 380 face to face. 950 long, 22 thick, 250 high. Flow (north): W1 -> kick across -> W2 ->
+   kick back -> W3, each wall overlapping the next by 350 so you can hop across the lane the whole way (or wall-run straight on). */
+addBoxSym( 305,  -778, 475, 11, 250, C.WALL);        // W1  x -170 .. 780  (lane 2)
+addBoxSym(-295, -1180, 475, 11, 250, C.WALL);        // W2  x -770 ..  180 (lane 1)
+addBoxSym(-895,  -778, 475, 11, 250, C.WALL);        // W3  x -1370 .. -420 (lane 2)
 
-// Launch pad (h115) at the end of the gauntlet; the 16 degree downhill speed ramp starts on its east face (115 / 400 = tan 16.0 deg).
-addBoxSym(750, -800, 100, 150, 115, C.PAD);
-addRampSym(1050, -800, 200, 150, 0, 115, '-x');
+// Gold pad (h118) at the end of W3 and the 15 degree downhill speed ramp beyond it (118 / 440 = tan 15.0 deg), wid 360, len 440, pointing out to the avenue.
+addBoxSym(-1440, -778, 70, 180, 118, C.PAD);
+addRampSym(-1730, -778, 220, 180, 0, 118, '+x');     // surface 0 at the west edge (x -1950) .. 118 at the pad
 
-/* ---- EAST + WEST multi-tier decks ---- */
-addBoxSym(740, 0, 260, 380, 110, C.DECK);                       // deck h110
-addRampSym(1240, -150, 240, 150, 0, 110, '-x');                 // wide double ramp 0 -> 110 (12.9 degrees)
-addRampSym(1240,  150, 240, 150, 0, 110, '-x');
-addBoxSym(900, -250, 30, 90, 260, C.COVER, 110);                // h260 cover blocks standing on the deck (base 110)
-addBoxSym(900,  250, 30, 90, 260, C.COVER, 110);
-addBoxSym(700,  -90, 100, 60, 230, C.LEDGE, 210);               // floating upper ledges, 100 over the deck: double jump or grapple
-addBoxSym(880,   90, 100, 60, 230, C.LEDGE, 210);
+/* ---- EAST + WEST decks: wide, open, one access ramp each ---- */
+addBoxSym(1100, 0, 320, 460, 110, C.DECK);                     // deck h110, x 780 .. 1420 (the bridges end on its inner edge)
+addRampSym(1660, 0, 240, 240, 0, 110, '-x');                   // wide access ramp 0 -> 110 (12.9 degrees), 480 wide
+addBoxSym(1000, -340, 60, 80, 180, C.COVER, 110);              // low cover (70 high) standing on the deck (base 110)
+addBoxSym(1000,  340, 60, 80, 180, C.COVER, 110);
+addBoxSym(1260,    0, 50, 60, 180, C.COVER, 110);
 
-/* ---- PERIMETER: grapple towers with beacon caps, round pillars ---- */
-[[1520, -1120], [1520, 1120]].forEach(function (p) {
-  addBoxSym(p[0], p[1], 40, 40, 380, C.TOWER);
-  addBoxSym(p[0], p[1], 46, 46, 404, C.SPEED, 380);              // beacon cap sits on the tower top
+/* ---- CORNERS: 4 grapple spires with gold caps, 4 thick swing pillars ---- */
+[[1900, -1150], [-1900, -1150]].forEach(function (p) {
+  addBoxSym(p[0], p[1], 40, 40, 420, C.TOWER);
+  addBoxSym(p[0], p[1], 46, 46, 444, C.SPEED, 420);              // cap sits on the spire top
 });
-addPillarSym(1330, -960, 280, C.PILLAR, 34);
-addPillarSym(1330,  960, 280, C.PILLAR, 34);
+addPillarSym(1250, -760, 300, C.PILLAR, 40);
+addPillarSym(1600, -1050, 300, C.PILLAR, 40);
 
 export var DISTRICT_MAP = {
   name: 'District',
-  rect: { hw: 1600, hd: 1200, lip: 14 },
+  rect: { hw: 2400, hd: 1700, lip: 24 },                         // low perimeter coping (visual only); nothing but spawns in the outer 450
 
-  // 6 spawns, y = 0, each >= 200 clear of every hole / box / pillar / ramp footprint (validateMap checks it).
+  // 6 spawns, y = 0, each >= 260 clear of every hole / box / pillar / ramp footprint (validateMap checks it); all on the open runout avenues.
   spawns: [
-    { x: 1490, y: 0, z: -560 },     // NE pocket, between the launch ramp and the east deck ramps
-    { x: -1490, y: 0, z: 560 },     // SW pocket (twin)
-    { x: 1490, y: 0, z: 760 },      // SE pocket, behind the south gauntlet's exit
-    { x: -1490, y: 0, z: -760 },    // NW pocket (twin)
-    { x: 530, y: 0, z: -1150 },     // north rim, behind the gauntlet
-    { x: -530, y: 0, z: 1150 }      // south rim (twin)
+    { x: 2240,  y: 0, z: -700 },    // E avenue
+    { x: -2240, y: 0, z: 700 },     // W avenue (twin)
+    { x: 2240,  y: 0, z: 700 },     // E avenue
+    { x: -2240, y: 0, z: -700 },    // W avenue (twin)
+    { x: 1000,  y: 0, z: -1500 },   // N avenue
+    { x: -1000, y: 0, z: 1500 }     // S avenue (twin)
   ],
 
   pillars: pillars,
   boxes: boxes,
 
   holes: [
-    { x: 0, z: 0, hw: 420, hd: 260 }       // central skylight pit under the skybridges
+    { x: 0, z: 0, hw: 640, hd: 360 }       // central skylight pit under the skybridges
   ],
 
   ramps: ramps
