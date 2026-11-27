@@ -7,16 +7,16 @@ The old game stays live in its own repo; this is a separate project. The old loc
 ## File map (one line per file; each file's header says what it loads after)
 
 ```
-index.html                 Join overlay (name, colour, Play, controls), minimal HUD (speed line, player count + ping, crosshair, toast, Tab scoreboard), loads src/main.js as a module.
+index.html                 Join overlay (name, colour, Play, controls), minimal HUD (speed line, player count + ping, crosshair, toast, Tab scoreboard), loads src/main.js as a module. Cinematic dark-glass UI: all styling is CSS only (see Visual identity), the markup / ids main.js uses are unchanged.
 package.json               Dependencies (three, rapier, socket.io-client, vite for the client; express, socket.io for the server), `start` = node server.js.
 server.js                  Express (serves dist/) + Socket.IO room: join / init, timeSync, ping, volatile state in, 30 Hz snapshot out, respawn, disconnect. Imports spawns from src/game/maps.js.
 src/config.js              Every tunable number, in OLD 2.5D units. SCALE converts to metres at the point of use. Includes the feel blocks `MANTLE` (ledge mantle) and `LAND` (landing camera dip).        (unchanged)
-src/game/maps.js           Map data (DISTRICT_MAP "Glitch" parkour arena) + boxSpan() / floorSlabs() / rampSpan() helpers + validateMap(). Pure data: imported by BOTH client and server.      (unchanged)
+src/game/maps.js           Map data (DISTRICT_MAP "Glitch" parkour arena) + boxSpan() / floorSlabs() / rampSpan() helpers + validateMap(). Pure data: imported by BOTH client and server. Owns the cyber-dusk palette `C` (exported as `PALETTE`) and an optional per-ramp colour `c`.
 src/input.js               Keyboard / mouse state and the per-tick input snapshot (direction, jump / dash edges, slide held, grapple held = Right-Click or E; Left-Click latched as `attack` for Step 2 melee).
 src/physics/player.js      Movement rules as stepPlayer(state, input, ctx): momentum run, jump, double jump, air-strafe, b-hop, crouch-slide, dash, wall-run, wall-kick, grapple, ledge mantle, look-steering, `state.sfx`.   (unchanged)
 src/physics/ragdoll.js     On-demand cosmetic 6-part Rapier ragdoll (spawnRagdoll / syncRagdollMeshes / despawnRagdoll).      (unchanged)
 src/physics/world.js       Rapier world built from the map, one kinematic capsule per local player view, rays, detectWall, groundGap, placePlayer, hasFallen, raycastGrapple, checkLedgeMantle, hasHeadroom.      (unchanged)
-src/render/scene.js        Three.js renderer, lights, District meshes, per-player puppets, grapple tethers (`setGrapple(slot, torso, anchor)`), setFocus.      (unchanged)
+src/render/scene.js        Three.js renderer, cyber-dusk sky / fog / lights, District meshes + instanced emissive accent strips, per-player armour puppets with energy-core rings, grapple tethers (`setGrapple(slot, torso, anchor)`), setFocus.
 src/render/camera.js       Mouse-orbit chase camera (PointerLock) with a Rapier raycast boom, landing dip.      (unchanged)
 src/main.js                Boot, socket client, YOUR 60 Hz tick (stepPlayer / stepWorld), 30 Hz 'state' send, remote players (smoothed puppets, tethers, ragdolls), fall / R respawn flow, join overlay, HUD, Tab scoreboard, `createAudio()` (zero-asset Web Audio synth). Loads LAST.
 src/game/state.js          UNUSED since the tag mode was removed (plain-data match state). Safe to delete.
@@ -33,8 +33,57 @@ src/game/rules.js          UNUSED since the tag mode was removed (tag rules). Sa
 - **Camera is view-only:** yaw / pitch live in the camera rig and never enter the simulation state.
 - **Physics code stays a pure function of (state, input)** where possible.
 - **Client-authoritative:** the server never simulates movement. It sanity-clamps what a client sends and relays it. (Cheating is possible by design for this stage; melee hits will need a decision, see Step 6 notes.)
-- **Rendering budget:** District must hold 60+ FPS. No background geometry (no skyline / facade / street, only the sky gradient), sun shadow map 1024 x 1024,
-  floor slabs and trims never cast shadows (they only receive), one shared geometry per puppet part, camera far plane 400 m. Do not add decorative geometry without checking FPS.
+- **Rendering budget:** District must hold 60+ FPS. No background geometry (no skyline / facade / street, only the dusk sky gradient), sun shadow map 1024 x 1024,
+  floor slabs and trims never cast shadows (they only receive), one shared geometry per puppet part, camera far plane 400 m. Emissive accent strips are NOT background geometry: they sit on map pieces and are drawn as 5 `InstancedMesh` batches (one draw call per shape + colour, no shadows). Add new accents to those batches, never as loose meshes. Do not add decorative geometry without checking FPS.
+
+## Visual identity: cinematic cyber-dusk
+
+Look reference: Mirror's Edge Catalyst, Ghostrunner, Titanfall 2. Dark, grounded architecture lit by a low amber sun, with "runner vision" accents that mark what you can run, grab and launch from. Visual change only: no map coordinate, collider, `boxSpan` / `floorSlabs` / `rampSpan` / `validateMap` behaviour or physics number changed, and the performance budget is unchanged (1024 x 1024 shadow, no background geometry).
+Every mood number lives in the constants at the top of `scene.js` (`SKY_STOPS`, `FOG`, `SUN`, `HEMI`, `GLOW`, `GLOW_INTENSITY`) and the `:root` variables at the top of `index.html`.
+
+**Atmosphere (`scene.js`)**
+
+| Item | Value |
+|------|-------|
+| Sky | screen-space gradient canvas (2 x 512): `#090d16` zenith -> `#1a2436` -> `#e06d53` -> `#ffb07c` at the bottom (horizon) |
+| Fog | `Fog(0x262b3d, 180, 950)` metres (the camera far plane stays 400 m) |
+| Sun | `DirectionalLight(0xffcfa8, 2.1)`, offset `(62, 34, 22)` from the focus point = about 27 degrees above the horizon: long shadows. `shadow.normalBias 0.03` because a low sun grazes every face. Shadow map 1024 x 1024 |
+| Hemisphere | `HemisphereLight(0x6c88b5 sky, 0x1b202b ground, 1.1)` |
+| Floor | `makeFloorTexture()`: dark brushed concrete `#1e232b` (seamless deterministic grain), `#2c333f` expansion-joint lines on every 5 m tile border + a groove line + a faint half-tile guide; roughness 0.82. Rim trims: silver-grey `0x8d99ae`, roughness 0.4 / metalness 0.2 |
+
+**Palette (`maps.js` `C`, plus accents added by `scene.js`)**
+
+| Key | Base | Accent (added in scene.js, strips are lit by emissive only) |
+|-----|------|-------------------------------------------------------------|
+| `DECK` | `0x2b323c` dark gunmetal steel | none (also the colour of the two deck access ramps) |
+| `COVER` | `0x3f4754` weathered slate concrete | none |
+| `BRIDGE` | `0xb8c2cc` light titanium | none |
+| `WALL` | `0x1b3b4b` deep carbon-blue | electric cyan `0x00e5ff`: crown line, run-height line (36 % of the height) and two end posts, on BOTH faces |
+| `BILL` | `0x22262e` charcoal frame | sunset amber `0xff7b29` face panel (94 % x 72 % of the face) on both faces |
+| `PAD` | `0x2e343d` industrial iron | molten gold `0xffaa00` strips along the 4 top edges |
+| `SPEED` | `0x2e343d` industrial iron | molten gold strips along both slope edges of the speed ramps, one gold band round each spire cap |
+| `TOWER` | `0x1c2128` matte obsidian | cyan ring 0.55 m below the top + amber ring 1.05 m below it |
+| `PILLAR` | `0x1c2128` matte obsidian | cyan + amber cylindrical rings at the same offsets |
+
+- **How pieces are recognised:** `maps.js` exports `PALETTE` (= `C`); `scene.js` compares `b.c === PALETTE.WALL` etc. by reference, so the map data gained no fields. `PAD` and `SPEED` have the same colour value but are different arrays, so keep `hex()` per entry. Ramps accept an optional trailing colour in `addRampSym(..., dir, c)`: the speed ramps pass `C.SPEED`, the deck ramps `C.DECK`. world.js and `validateMap` never read it.
+- **Finish per palette entry** is the `SURFACE` table in `scene.js` (`[roughness, metalness]`). There is no environment map, so metalness stays <= 0.35 (a metal surface only lights up under the sun).
+- **Accent strips:** `strip(kind, key, x, y, z, sx, sy, sz, q?)` pushes a matrix into `glow.box.{cyan,amber,gold}` or `glow.cyl.{cyan,amber}`; at the end of `createScene` each non-empty list becomes one `InstancedMesh` (unit box / unit cylinder scaled per instance, `MeshStandardMaterial` with `emissive`, `emissiveIntensity` 1.8, `frustumCulled = false`, no shadows). Strips are 0.06 m thick across the face (0.03 m proud) so they do not z-fight at the 400 m far plane. Current District: 84 strips in 5 draw calls (52 cyan, 8 amber, 16 gold, 4 + 4 cylinder rings).
+- **Wall-run readability:** the cyan run-height line sits at 36 % of the wall (2.25 m on the 6.25 m walls) and the crown line at the top, so the wall-run surface and its end are readable at 760 units / s.
+
+**Runner suit (`scene.js` `createPuppet`)**
+
+- Armour material: the player colour lerped 50 % toward `0x10141b`, `roughness 0.35`, `metalness 0.25`. Used by the capsule and all 6 ragdoll parts.
+- Energy core material: the pure player colour as `color` and `emissive`, `emissiveIntensity 0.65`. Capsule: a chest ring and a thinner shoulder ring (shared torus geometry, rotation-symmetric, so the faceless capsule needs no facing); `setHeight(h)` moves them with the squash so a slide pulls them down with the body. Ragdoll: an emissive chest band is a child of the torso and a shoulder cap is a child of each arm, so `syncRagdollMeshes` needs no change.
+- Still one shared geometry per part (the ring / band / cap geometries are shared too); each puppet owns exactly two materials.
+
+**Glass UI (`index.html`, CSS only)**
+
+- Panels (`#hud`, `#net`, `#toast`, `#resume`, `#netWarn`, `#scoreboard`, `#card`): `rgba(10, 14, 22, 0.78)`, `backdrop-filter: blur(12px)`, `1px solid rgba(255, 255, 255, 0.12)` (with an opaque-ish fallback under `@supports not`). Font `Inter, system-ui, monospace` (system fonts only, nothing is downloaded); numbers use tabular figures and a mono stack.
+- Accents: cyan `#00e5ff` (HUD edge, crosshair glow, grapple status, focus rings, Play button, "me" row on the scoreboard) and amber `#ffaa00` (net panel edge, key labels in the controls list, join subtitle, toast underline). The join card has a cyan -> amber top line over a dusk-coloured wash that blurs the live scene.
+- The small panels are hidden with `:empty` while `main.js` has nothing in them, so no blank glass shows. `toast`, `resume` and `netWarn` are centred pills (`left: 50%` + `translateX`) instead of full-width bars.
+- All ids, classes and the DOM were left byte-for-byte as before, so `main.js` (scoreboard rows `.row .head .me .nm .sw .n`, `#sbRows`, overlay ids) needs no change.
+
+**Not verified in a browser.** The map passes `validateMap`, and `scene.js` was run against a stub `three` (no exceptions, 5 instanced batches, no NaN transforms, 1024 x 1024 shadow). Real rendering is untested: check the FPS, how dark the floor reads in your monitor (raise `HEMI.intensity` or `GLOW_INTENSITY` if you want it brighter), shadow acne on the low sun (`normalBias`) and the ramp-edge strip alignment.
 
 ## Migration plan
 
@@ -75,7 +124,7 @@ src/game/rules.js          UNUSED since the tag mode was removed (tag rules). Sa
 - **runT:** `RUN` in `config.js`. Speed goes `min -> max` over `rampT` seconds of clean ground running (x`itBonus` when IT).
   Held in the air (so jumps, slides, dashes and flings keep it), drains at `stopDecay` with no input on the ground and at
   `wallDecay` while pressed against a wall (moved distance < `wallRatio` of the wanted distance).
-- The yellow HUD line (top left) shows live speed in old units and runT, for tuning (plus `slideboost ready / cooldown`).
+- The HUD tuning line (top left, amber text in a glass panel) shows live speed in old units and runT, for tuning (plus `slideboost ready / cooldown`).
 - **Jump:** `JUMP` in `config.js` (impulse 350, buffer 0.12 s, coyote 0.10 s, gravRise 850, gravFall 1100, airAccel 3).
   Space is latched on key press in `input.js` and consumed by the next tick, so a press is never lost between frames.
   A jump fires when `jumpBuf > 0` and `coyote > 0`; both are zeroed on takeoff, so there is no double jump. Gravity is
@@ -133,8 +182,8 @@ src/game/rules.js          UNUSED since the tag mode was removed (tag rules). Sa
   chain count is left alone, and normal air-strafing continues from the next tick.
 - **Camera roll:** `updateCamera(..., wallSide)` eases `rig.roll` to `wallSide * camTilt` and applies it with `camera.rotateZ` after `lookAt`
   (leans away from the wall). HUD shows `AIRJ n`, `WALLRUN`, and `regrab` seconds.
-- **Wall height:** the wall ray sits `torso` (36) above the feet, so a wall must be taller than the jump arc to be run along. The 230-high
-  cyan gauntlet panels (north / south) and the orange billboards over the pit are the main wall-run spots.
+- **Wall height:** the wall ray sits `torso` (36) above the feet, so a wall must be taller than the jump arc to be run along. The 250-high
+  carbon-blue gauntlet panels with cyan strips (north / south) and the amber-faced billboards over the pit are the main wall-run spots.
 - **Speed FOV (`CAM.fovWarp*`):** `updateCamera(..., speed)` eases the FOV up to +15 degrees between 300 and 750 units / s.
 - **HUD:** `spd`, `runT`, `BHOP` (chain count, `(window)` while open), `DASH` (ready / GO / cooldown seconds), `SLIDE`.
 - **Visuals:** `state.height` drives the mesh squash (`setPuppetHeight`) and the camera pivot (scaled by height / standing
@@ -183,15 +232,15 @@ Small mechanics that join the verbs together so a route never stops on a lip or 
 - **Player snag (not wired in the multiplayer client, see Step 6):** reaching a player sets `grappleHit`; `main.js` (after `stepGameRules`) gives that player `stun = hitStun`, a horizontal shove away from the grappler (`max(hitShove, 0.6 * grappler speed)`) and ends their own hook.
   It works the same for IT (tag set-up) and runners (sabotage / escape). state.js / rules.js are untouched: it only writes the existing `stun`, `vx`, `vz` fields, which the existing knock / ragdoll code already reads.
 - **Visuals / HUD:** `view.setGrapple(i, torso, anchor)` draws a thin glowing cylinder + hook ball per hooked player. The crosshair dot and the status line under it ("GRAPPLE READY" / cooldown seconds / "HOOKED")
-  are created from `main.js` (`makeCrosshair`), so `index.html` did not change. The yellow tuning line also shows `GRAPPLE ready / GO / cooldown`.
+  are created from `main.js` (`makeCrosshair`), so `index.html` did not change. The tuning line also shows `GRAPPLE ready / GO / cooldown`.
 - **Not done:** the tether is cosmetic (no rope collision); remote players cannot be hooked (they have no capsule in the multiplayer client).
 
 ## Step 3 progress (maps)
 
 | Item | Status |
 |------|--------|
-| District colliders: floor slabs around the central pit, 42 boxes (16 floating), 4 pillars, 6 ramp wedges | map data done; `y0` consumer patch in world.js pending (see Step 3.1) |
-| District meshes: slabs (world-aligned grid), rim trims, boxes, pillars, ramps (the old building shaft + skyline are gone, see Rendering budget) | done |
+| District colliders: floor slabs around the central pit, 28 boxes (14 floating), 4 pillars, 4 ramp wedges | map data done; `y0` consumer patch in world.js pending (see Step 3.1) |
+| District meshes: slabs (world-aligned grid), rim trims, boxes, pillars, ramps, instanced emissive accent strips (the old building shaft + skyline are gone, see Rendering budget) | done |
 | Spawn at `DISTRICT_MAP.spawns`, fall below -12 m (ragdoll + server respawn, see Step 6), `R` | done |
 | Arena, Large, Roof, Complex maps | |
 
@@ -199,7 +248,7 @@ Small mechanics that join the verbs together so a route never stops on a lip or 
   holes = the rect exactly). `rampSpan(ramp)` gives the low / high edge, width and rotation of a ramp. world.js and scene.js both build from these.
 - **Colliders (world.js):** every static piece is in `WALL_GROUP` (floor slabs, boxes, cylinders for pillars, ramps), so `detectWall`, `groundGap` and the
   camera boom all see the same geometry. A skylight hole is simply no collider there, so the player falls through.
-- **Ramps are solid wedges** (a convex hull of the edge profile), not tilted slabs: nothing hollow under them to slide into. Slopes in the current District: 16.0 (speed ramps) and 12.9 (deck ramps) degrees.
+- **Ramps are solid wedges** (a convex hull of the edge profile), not tilted slabs: nothing hollow under them to slide into. Slopes in the current District: 15.0 (speed ramps) and 12.9 (deck ramps) degrees.
   A near-horizontal wall ray never counts a ramp surface as a wall (the normal filter rejects slopes under 30 degrees from horizontal).
 - **Slope handling in player.js (needed once ramps existed):**
   1. The "blocked" velocity clamp is skipped when the controller climbed on its own (`vy <= 0` but `c.y > 0`): on a slope the controller turns part of the
@@ -211,8 +260,8 @@ Small mechanics that join the verbs together so a route never stops on a lip or 
   fall (the same respawn request). `placePlayer` / `teleportPlayer`
   restore the standing capsule (a slide shrinks it) and `main.js` resets all movement state (`createPlayerState`).
 - **Spawn selection (old single-player behaviour; the server picks spawns now, see Step 6):** `MAP.spawn` (default 0) or `?spawn=N` in the page URL (0-5), e.g. `?spawn=2` drops YOU on the SE pocket (the spawn list is rotated so the bots take the other five). Faces the middle of the roof (the pit).
-- **Rendering notes:** floor slabs share one grid texture with world-aligned offsets (5 m tiles) so lines run straight across slab seams; rim trims are visual
-  only (a 14-unit coping strip on the roof edge and around each hole); there is no geometry outside the roof (the pit looks into the sky gradient + fog);
+- **Rendering notes:** floor slabs share one brushed-concrete grid texture with world-aligned offsets (5 m tiles) so lines run straight across slab seams; rim trims are visual
+  only (a 24-unit silver-grey coping strip on the roof edge and around each hole); there is no geometry outside the roof (the pit looks into the dusk sky gradient + fog);
   the sun and its 1024 shadow map follow the focus point (`setFocus`: your capsule, or your ragdoll torso while you tumble).
 
 ## Step 3.1: elevated floating boxes (`y0`) + "Glitch" District redesign
@@ -240,18 +289,17 @@ Shadows / rim trims are unchanged. Floating boxes are normal `WALL_GROUP` collid
 (build the collider from `hw / hd` or from the edges, both exact for integer maps). slabs + holes tile the rect exactly (checked by `validateMap`). Ramps always rise from `base`
 (0 = floor), so there is no air gap under a wedge, and the high edge of a ramp that meets a deck face touches it exactly.
 
-**DISTRICT_MAP "Glitch" layout** (rect `hw 1600, hd 1200` = 3200 x 2400, point-symmetric under `(x, z) -> (-x, -z)`, built with `addBoxSym` etc.):
+**DISTRICT_MAP "Glitch" layout** (as in `maps.js`; rect `hw 2400, hd 1700` = 4800 x 3400, point-symmetric under `(x, z) -> (-x, -z)`, built with `addBoxSym` etc.; everything of substance is inside |x| <= 1950, |z| <= 1250 and the outer 450 is an open runout avenue). Colours are the cyber-dusk palette (see Visual identity).
 
 | Zone | Pieces |
 |------|--------|
-| Centre | skylight pit `hw 420, hd 260`; two floating skybridges (`y0 110, h 130`, 120 wide, ends touch the decks at x = +-480); two floating orange `0xe67e22` billboards (`y0 150, h 330`, 20 thick) above them |
-| North / South | 9 cyan `0x3498db` wall-run panels per side (`h 230`, 20 thick), rows 230 / 250 apart face to face, staggered so each panel ends where the opposite row's next one starts; exit onto an h115 launch pad and a 16.0 degree gold `0xf1c40f` downhill speed ramp (400 long, 300 wide) |
-| East / West | h110 decks, wide double ramps `0 -> 110`, h260 cover blocks on the deck (`y0 110`), two floating ledges per deck (`y0 210, h 230`, 100 over the deck: double jump or grapple) |
-| Perimeter | 4 grapple towers (`h 380`) with yellow beacon caps (`y0 380, h 404`), 4 round pillars (`r 34, h 280`) |
-| Spawns | 6, all `y = 0`, in the NE / SW / SE / NW pockets and the north / south rim, each >= 200 clear of every hole / obstacle footprint (min 222) |
+| Centre | skylight pit `hw 640, hd 360`; two floating light-titanium skybridges (`y0 115, h 135`, 170 deep, 780 half length, ends rest on the deck faces); two floating charcoal billboards with amber faces (`y0 155, h 350`, 24 thick, 560 half length) above them |
+| North / South | 3 carbon-blue wall-run walls per side (`h 250`, 22 thick, 950 long) over two lanes 380 apart face to face, each wall overlapping the next by 350; exit onto an h118 iron launch pad and a 15.0 degree downhill speed ramp (440 long, 360 wide) pointing out to the avenue |
+| East / West | h110 gunmetal decks (`hw 320, hd 460`), one wide access ramp each (`0 -> 110`, 12.9 degrees, 480 wide), three slate cover blocks on each deck (`y0 110, h 180`) |
+| Perimeter | 4 obsidian grapple spires (`h 420`) with gold-banded caps (`y0 420, h 444`), 4 round obsidian pillars (`r 40, h 300`) |
+| Spawns | 6, all `y = 0`, on the E / W avenues and the N / S rim, each >= 260 clear of every hole / obstacle footprint (min 290) |
 
-Known limits: the gauntlet exit pad is a head-on h115 face for a player wall-running straight at it (wall-kick or jump over it, or take the ramp from below); nothing here has been play-tested for
-speed tuning.
+Known limits: nothing here has been play-tested for speed tuning.
 
 **Verification.** `validateMap(DISTRICT_MAP)` (exported from maps.js, pure data, no engine) checks: exports, shape and everything inside the rect, 3D box / box overlaps that respect `y0..h`,
 ramp / ramp, ramp / box (using the ramp height over the overlap), ramp / pillar, pillar overlaps, nothing standing in a hole (floating boxes may span it), slab + hole tiling, 6 spawns at `y = 0`
@@ -262,8 +310,7 @@ and that every ramp's low edge meets that connected ground. Run it under Node (m
 cp src/game/maps.js /tmp/maps.mjs && node -e "import('/tmp/maps.mjs').then(({DISTRICT_MAP:m,validateMap:v})=>{const r=v(m);console.log(r.ok,r.stats,r.errors)})"
 ```
 
-Last run: ok, 42 boxes (16 floating), 4 pillars, 6 ramps, 1 hole, 4 floor slabs, min spawn clearance 222, 12184 open ground cells, 0 pockets. Injected faults (box overlapping a skybridge, box in the pit,
-spawn off the floor, wall sealing a lane, overlapping ramp) are all reported.
+Last run (after the cyber-dusk palette change, which touches no coordinates): ok, 28 boxes (14 floating), 4 pillars, 4 ramps, 1 hole, 4 floor slabs, min spawn clearance 290, 31590 open ground cells, 0 pockets. The earlier injected-fault checks (box overlapping a skybridge, box in the pit, spawn off the floor, wall sealing a lane, overlapping ramp) were not repeated for this change.
 
 ## Step 6: multiplayer (server.js + src/main.js)
 

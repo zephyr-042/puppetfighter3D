@@ -10,36 +10,39 @@
               Vertical centre = (y0 + h) / 2, full height = h - y0. Use boxSpan(b) so world.js and scene.js agree.
    - pillars: { x, z, r, h, c }       round, grab-able (orbit, release to fling)
    - holes:   { x, z, hw, hd }        floor holes, stand over one and you fall
-   - ramps:   { x, z, hw, hd, y0, y1, dir, base? }
+   - ramps:   { x, z, hw, hd, y0, y1, dir, base?, c? }
               centre, half extents, surface height at the LOW edge (y0) and HIGH edge (y1). NOTE: ramp y0 is a SURFACE height,
               it is not the box y0. `base` (default 0) is the height of the solid wedge's underside.
               dir = direction of ASCENT: '+x' | '-x' | '+z' | '-z'. Height is linear along that axis.
-   - c: [r, g, b] 0..255 (the hex() helper converts 0xRRGGBB, so the palette below reads like web colours).
+              `c` (optional, [r, g, b]) is the ramp's palette colour; physics ignores it, scene.js uses it for the material and, for C.SPEED ramps, the molten-gold edge strips.
+   - c: [r, g, b] 0..255 (the hex() helper converts 0xRRGGBB, so the palette below reads like web colours). The palette is also exported as PALETTE so scene.js can
+     recognise a piece by reference (b.c === PALETTE.WALL) and attach its emissive accents without any extra fields in the map data.
 
-   DISTRICT_MAP (this file) is a bright, spacious DAYTIME rooftop parkour arena, 4800 x 3400 (hw 2400, hd 1700), point-symmetric (x, z) -> (-x, -z).
+   DISTRICT_MAP (this file) is a spacious CYBER-DUSK rooftop parkour arena (grounded architectural materials, runner-vision accents added by scene.js), 4800 x 3400 (hw 2400, hd 1700), point-symmetric (x, z) -> (-x, -z).
    Everything of substance lives inside |x| <= 1950, |z| <= 1250; the 450-wide ring outside that is an open runout avenue (spawns, a clear view over the edge).
-     centre  : skylight pit (hw 640, hd 360) spanned by two floating skybridges (y0 115 .. 135) with two long floating orange wall-run billboards
+     centre  : skylight pit (hw 640, hd 360) spanned by two floating skybridges (y0 115 .. 135) with two long floating wall-run billboards (charcoal frame, glowing amber faces)
                (y0 155 .. 350) above them, open air above and below
-     N / S   : 6 long cyan wall-run walls (950 long, 22 thick, 250 high), staggered over two lanes 380 apart face to face; each chain ends in a gold
-               pad (h118) and a 15 degree downhill speed ramp (wid 360, len 440) pointing out to the avenue (the south chain runs the other way round)
+     N / S   : 6 long carbon-blue wall-run walls with cyan strips (950 long, 22 thick, 250 high), staggered over two lanes 380 apart face to face; each chain ends in an iron
+               pad (h118, gold edge strips) and a 15 degree downhill speed ramp (wid 360, len 440) pointing out to the avenue (the south chain runs the other way round)
      E / W   : two wide h110 decks (hw 320, hd 460), one wide access ramp each (0 -> 110), a little low cover, nothing floating
-     corners : 4 h420 grapple spires with gold caps, 4 r40 h300 swing pillars
+     corners : 4 h420 obsidian grapple spires with cyan / amber beacon rings and gold caps, 4 r40 h300 swing pillars
      28 boxes in all (was 42): no clutter within 400-600 units of any zone, so nothing gets clipped at 760 units / s.
    ============================================================================ */
 
 function hex(n) { return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
 
 var C = {
-  DECK:   hex(0x5d7a96),   // E / W decks
-  COVER:  hex(0xa9b4b8),   // low cover on the decks
-  BRIDGE: hex(0xf3f6f8),   // central skybridges
-  BILL:   hex(0xff8a1f),   // high wall-run billboards (vibrant orange)
-  WALL:   hex(0x1ec6ea),   // wall-run walls (cyan)
-  PAD:    hex(0xf5b014),   // launch pads at the end of each wall chain
-  SPEED:  hex(0xf1c40f),   // downhill speed ramps, spire caps (yellow-gold)
-  TOWER:  hex(0x34495e),   // grapple spire shafts
-  PILLAR: hex(0x1abc9c)    // round swing pillars
+  DECK:   hex(0x2b323c),   // E / W decks: dark gunmetal steel
+  COVER:  hex(0x3f4754),   // low cover on the decks: weathered slate concrete
+  BRIDGE: hex(0xb8c2cc),   // central skybridges: sleek light titanium
+  BILL:   hex(0x22262e),   // high wall-run billboards: dark charcoal frame (scene.js adds the glowing sunset-amber 0xff7b29 face panels)
+  WALL:   hex(0x1b3b4b),   // wall-run walls: deep carbon-blue (scene.js adds the electric-cyan 0x00e5ff strips)
+  PAD:    hex(0x2e343d),   // launch pads at the end of each wall chain: dark industrial iron (molten gold-amber 0xffaa00 edge strips)
+  SPEED:  hex(0x2e343d),   // downhill speed ramps + spire caps: dark industrial iron (molten gold-amber 0xffaa00 edge strips)
+  TOWER:  hex(0x1c2128),   // grapple spire shafts: matte obsidian steel (cyan / amber beacon rings near the top)
+  PILLAR: hex(0x1c2128)    // round swing pillars: matte obsidian steel (cyan / amber beacon rings near the top)
 };
+export var PALETTE = C;    // scene.js matches pieces to accents by reference (b.c === PALETTE.WALL), so keep one array per colour
 
 // box(x, z, hw, hd, h, c [, y0]): y0 is stored only when it is above the floor, so legacy boxes stay { x, z, hw, hd, h, c }.
 function box(x, z, hw, hd, h, c, y0) {
@@ -55,9 +58,11 @@ function addBox(x, z, hw, hd, h, c, y0) { boxes.push(box(x, z, hw, hd, h, c, y0)
 function addBoxSym(x, z, hw, hd, h, c, y0) { addBox(x, z, hw, hd, h, c, y0); addBox(-x, -z, hw, hd, h, c, y0); }
 function addPillarSym(x, z, h, c, r) { pillars.push(pillar(x, z, h, c, r)); pillars.push(pillar(-x, -z, h, c, r)); }
 var OPP = { '+x': '-x', '-x': '+x', '+z': '-z', '-z': '+z' };
-function addRampSym(x, z, hw, hd, y0, y1, dir) {
-  ramps.push({ x: x, z: z, hw: hw, hd: hd, y0: y0, y1: y1, dir: dir });
-  ramps.push({ x: -x, z: -z, hw: hw, hd: hd, y0: y0, y1: y1, dir: OPP[dir] });
+function addRampSym(x, z, hw, hd, y0, y1, dir, c) {
+  var a = { x: x, z: z, hw: hw, hd: hd, y0: y0, y1: y1, dir: dir };
+  var b = { x: -x, z: -z, hw: hw, hd: hd, y0: y0, y1: y1, dir: OPP[dir] };
+  if (c) { a.c = c; b.c = c; }                     // optional palette colour (visual only; world.js does not read it)
+  ramps.push(a); ramps.push(b);
 }
 
 /* ---- CENTRE: the skylight pit is spanned by two floating skybridges; two long orange billboards float above them ----
@@ -72,18 +77,18 @@ addBoxSym( 305,  -778, 475, 11, 250, C.WALL);        // W1  x -170 .. 780  (lane
 addBoxSym(-295, -1180, 475, 11, 250, C.WALL);        // W2  x -770 ..  180 (lane 1)
 addBoxSym(-895,  -778, 475, 11, 250, C.WALL);        // W3  x -1370 .. -420 (lane 2)
 
-// Gold pad (h118) at the end of W3 and the 15 degree downhill speed ramp beyond it (118 / 440 = tan 15.0 deg), wid 360, len 440, pointing out to the avenue.
+// Iron pad (h118, gold edge strips) at the end of W3 and the 15 degree downhill speed ramp beyond it (118 / 440 = tan 15.0 deg), wid 360, len 440, pointing out to the avenue.
 addBoxSym(-1440, -778, 70, 180, 118, C.PAD);
-addRampSym(-1730, -778, 220, 180, 0, 118, '+x');     // surface 0 at the west edge (x -1950) .. 118 at the pad
+addRampSym(-1730, -778, 220, 180, 0, 118, '+x', C.SPEED);     // surface 0 at the west edge (x -1950) .. 118 at the pad
 
 /* ---- EAST + WEST decks: wide, open, one access ramp each ---- */
 addBoxSym(1100, 0, 320, 460, 110, C.DECK);                     // deck h110, x 780 .. 1420 (the bridges end on its inner edge)
-addRampSym(1660, 0, 240, 240, 0, 110, '-x');                   // wide access ramp 0 -> 110 (12.9 degrees), 480 wide
+addRampSym(1660, 0, 240, 240, 0, 110, '-x', C.DECK);                 // wide access ramp 0 -> 110 (12.9 degrees), 480 wide
 addBoxSym(1000, -340, 60, 80, 180, C.COVER, 110);              // low cover (70 high) standing on the deck (base 110)
 addBoxSym(1000,  340, 60, 80, 180, C.COVER, 110);
 addBoxSym(1260,    0, 50, 60, 180, C.COVER, 110);
 
-/* ---- CORNERS: 4 grapple spires with gold caps, 4 thick swing pillars ---- */
+/* ---- CORNERS: 4 grapple spires with iron caps (gold strip) + cyan / amber beacon rings, 4 thick swing pillars ---- */
 [[1900, -1150], [-1900, -1150]].forEach(function (p) {
   addBoxSym(p[0], p[1], 40, 40, 420, C.TOWER);
   addBoxSym(p[0], p[1], 46, 46, 444, C.SPEED, 420);              // cap sits on the spire top
