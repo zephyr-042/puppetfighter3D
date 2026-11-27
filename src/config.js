@@ -41,8 +41,10 @@ export const JUMP = {
   doubleJumpImpulse: 320, // upward speed of the air jump, units / s
   maxAirJumps: 1,      // air jumps available after leaving the ground; refilled on the ground and while wall-running
   doubleJumpDir: 70,   // units / s: crisp impulse toward the held keys on an air jump (never lowers horizontal speed)
-  airWishCap: 45,      // units / s: the wish speed used for the "how much more can I add" check (small = strafing matters)
-  airAccel: 14,        // acceleration factor: max added per tick = airAccel * runSpeed * dt (still limited by the cap check)
+  airWishCap: 85,      // units / s: the wish speed used for the "how much more can I add" check (small = strafing matters)
+  airAccel: 18,        // acceleration factor: max added per tick = airAccel * runSpeed * dt (still limited by the cap check)
+  airTurnRate: 2.2,    // 1 / s: while a direction is held in the air, this fraction per second (x STEP per tick) of the angle between the velocity and
+                       // the wish direction is rotated away, keeping the horizontal speed (Titanfall-style air carving; 0 = pure Source strafing)
 };
 
 // ---- b-hop: landing opens a short window where ground friction / the run-speed clamp is skipped
@@ -65,8 +67,8 @@ export const WALLRUN = {
   wallGrav: 240,       // units / s^2 gravity while wall-running (normal fall is JUMP.gravFall)
   maxFall: 150,        // units / s: downward speed is clamped to this while wall-running
   kickUp: 360,         // upward speed of the wall-kick
-  kickOut: 260,        // speed pushed away from the wall along its normal
-  kickFwd: 50,         // extra speed along the run direction
+  kickOut: 115,        // speed pushed away from the wall along its normal (small: a clean pop that can curve back onto the next inline panel)
+  kickFwd: 85,         // extra speed along the run direction
   regrabCd: 0.25,      // s during which the wall you just kicked off cannot be caught again
   camTilt: 0.21,       // radians of camera roll while wall-running (leans away from the wall)
   tiltEase: 8,         // 1 / s: how fast the roll follows
