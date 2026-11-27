@@ -1,35 +1,38 @@
 # Puppet Fighter 3D - architecture
 
-Browser-only 3D rewrite of the 2.5D `puppetfighter`. Vite + Three.js + Rapier3D (WASM). Static hosting, no servers.
-The old game stays live in its own repo; this is a separate project.
+Browser 3D rewrite of the 2.5D `puppetfighter`, now a **dedicated multiplayer game**: Vite + Three.js + Rapier3D (WASM) client, Node.js + Express + Socket.IO server (Render.com).
+Client-authoritative movement: every player simulates their own Titanfall 2 style movement locally at 60 Hz (0 ms movement lag) and the server relays 30 Hz state.
+The old game stays live in its own repo; this is a separate project. The old local tag mode (bots, tag rules, rounds, sandbox) is gone.
 
 ## File map (one line per file; each file's header says what it loads after)
 
 ```
-index.html                 Page shell + match HUD (timer, IT status, IT-time leaderboard, round / match banner), bottom hint bar incl. `[G] Mode: TAG / SANDBOX`, loads src/main.js as a module.
-package.json               Dependencies (three, @dimforge/rapier3d-compat) and vite scripts.
-src/config.js              Every tunable number, in OLD 2.5D units. SCALE converts to metres at the point of use. Includes the feel blocks `MANTLE` (ledge mantle) and `LAND` (landing camera dip).
-src/game/maps.js           Map data (DISTRICT_MAP "Glitch" parkour arena: boxes with optional floating y0, pillars, holes, ramps, spawns) + shared boxSpan() / floorSlabs() / rampSpan() helpers + validateMap() (Node-runnable data checks).
-src/input.js                Keyboard state and the per-tick input snapshot (wanted direction, jump edge, dash edge, slide held, grapple held (E / right mouse); grab to follow).
-src/game/state.js          Plain-data match state (players, mode, timers, events). No engine deps. Spawns are passed in METRES.
-src/game/rules.js          Tag rules over that state: tag, dash shove, slide trip, soft separation, IT-time scoring, rounds / match end.
-src/physics/player.js      Movement rules as stepPlayer(state, input, ctx): momentum run, jump, double jump, air-strafe, b-hop, crouch-slide (Titanfall 2 style: entry boost, slope acceleration, slide-hop), dash, wall-run, wall-kick, grapple / sticky hand; `state.locked` ignores input (stun / freeze); pillar orbit to follow. Also: automatic ledge mantle after the move, look-steering air carve (W held), and a per-tick `state.sfx` list of sound events.
-src/physics/ragdoll.js     On-demand cosmetic 6-part Rapier ragdoll (spawnRagdoll / syncRagdollMeshes / despawnRagdoll), RAGDOLL_RIG dimensions, collision groups.
-src/physics/world.js       Rapier world built from the map (floor slabs, boxes, pillars, ramp wedges, all in WALL_GROUP), one kinematic capsule per player (PLAYER_GROUP) with a shared character controller, rays, detectWall, groundGap, placePlayer / teleportPlayer, nudgePlayer, hasFallen, raycastGrapple (level + player shots). Also `checkLedgeMantle(ctx, dirX, dirZ)` and `hasHeadroom(ctx, h, at?)`.
-src/render/scene.js        Three.js renderer, lights, the District meshes (slabs + rim trims, boxes, pillars, ramps), no background geometry, per-player puppets (faceless capsule + hidden 6-part ragdoll meshes), the red IT cone (setItMarker), setFocus moves the sun, setGrapple draws the grapple tether.
-src/render/camera.js       Mouse-orbit chase camera (PointerLock) with a Rapier raycast boom. Landing dip spring (`triggerLandDip`).
-src/main.js                Boot, 6-player match (1 human + 5 bots, botInput), the glue between player.js / world.js / rules.js, ragdoll on stun / fall, grapple aim + snag stun, crosshair / grapple HUD, fixed 60 Hz tick decoupled from the render loop, `[G]` / `?sandbox=1` TAG <-> SANDBOX toggle. Loads LAST. Also `createAudio()` (zero-asset Web Audio synth) and the sound / landing-dip hooks.
+index.html                 Join overlay (name, colour, Play, controls), minimal HUD (speed line, player count + ping, crosshair, toast, Tab scoreboard), loads src/main.js as a module.
+package.json               Dependencies (three, rapier, socket.io-client, vite for the client; express, socket.io for the server), `start` = node server.js.
+server.js                  Express (serves dist/) + Socket.IO room: join / init, timeSync, ping, volatile state in, 30 Hz snapshot out, respawn, disconnect. Imports spawns from src/game/maps.js.
+src/config.js              Every tunable number, in OLD 2.5D units. SCALE converts to metres at the point of use. Includes the feel blocks `MANTLE` (ledge mantle) and `LAND` (landing camera dip).        (unchanged)
+src/game/maps.js           Map data (DISTRICT_MAP "Glitch" parkour arena) + boxSpan() / floorSlabs() / rampSpan() helpers + validateMap(). Pure data: imported by BOTH client and server.      (unchanged)
+src/input.js               Keyboard / mouse state and the per-tick input snapshot (direction, jump / dash edges, slide held, grapple held = Right-Click or E; Left-Click latched as `attack` for Step 2 melee).
+src/physics/player.js      Movement rules as stepPlayer(state, input, ctx): momentum run, jump, double jump, air-strafe, b-hop, crouch-slide, dash, wall-run, wall-kick, grapple, ledge mantle, look-steering, `state.sfx`.   (unchanged)
+src/physics/ragdoll.js     On-demand cosmetic 6-part Rapier ragdoll (spawnRagdoll / syncRagdollMeshes / despawnRagdoll).      (unchanged)
+src/physics/world.js       Rapier world built from the map, one kinematic capsule per local player view, rays, detectWall, groundGap, placePlayer, hasFallen, raycastGrapple, checkLedgeMantle, hasHeadroom.      (unchanged)
+src/render/scene.js        Three.js renderer, lights, District meshes, per-player puppets, grapple tethers (`setGrapple(slot, torso, anchor)`), setFocus.      (unchanged)
+src/render/camera.js       Mouse-orbit chase camera (PointerLock) with a Rapier raycast boom, landing dip.      (unchanged)
+src/main.js                Boot, socket client, YOUR 60 Hz tick (stepPlayer / stepWorld), 30 Hz 'state' send, remote players (smoothed puppets, tethers, ragdolls), fall / R respawn flow, join overlay, HUD, Tab scoreboard, `createAudio()` (zero-asset Web Audio synth). Loads LAST.
+src/game/state.js          UNUSED since the tag mode was removed (plain-data match state). Safe to delete.
+src/game/rules.js          UNUSED since the tag mode was removed (tag rules). Safe to delete.
 ```
 
 ## Rules
 
 - **Scale:** `SCALE = 0.025`. 1 old unit = 0.025 m, so the 72-unit puppet is 1.8 m. Numbers are stored in old units in
-  `config.js` and multiplied by `SCALE` where they are used (`m()` helper). Retune there, never in logic.
-- **Fixed step:** simulation runs at `STEP = 1/60` with an accumulator in `main.js`. Rendering runs on `requestAnimationFrame`.
+  `config.js` and multiplied by `SCALE` where they are used (`m()` helper). Retune there, never in logic. The server uses the same constant for the spawns; everything on the wire is in METRES.
+- **Fixed step:** your simulation runs at `STEP = 1/60` with an accumulator in `main.js`. Rendering runs on `requestAnimationFrame`.
 - **Gameplay movement is kinematic:** a single capsule moved by our own velocity code; Rapier's
   `KinematicCharacterController` only resolves collisions (slopes, steps). Gravity is applied by us, not by Rapier.
 - **Camera is view-only:** yaw / pitch live in the camera rig and never enter the simulation state.
-- **Physics code stays a pure function of (state, input)** where possible, so guest prediction can replay it later.
+- **Physics code stays a pure function of (state, input)** where possible.
+- **Client-authoritative:** the server never simulates movement. It sanity-clamps what a client sends and relays it. (Cheating is possible by design for this stage; melee hits will need a decision, see Step 6 notes.)
 - **Rendering budget:** District must hold 60+ FPS. No background geometry (no skyline / facade / street, only the sky gradient), sun shadow map 1024 x 1024,
   floor slabs and trims never cast shadows (they only receive), one shared geometry per puppet part, camera far plane 400 m. Do not add decorative geometry without checking FPS.
 
@@ -40,9 +43,9 @@ src/main.js                Boot, 6-player match (1 human + 5 bots, botInput), th
 | 1 | Foundation: Vite + Three + Rapier, test floor, kinematic capsule with WASD, orbit chase camera with raycast boom | done |
 | 2 | Movement verbs from the old physics.js, one at a time (see Step 2 progress). Plan changed: movement before maps | in progress |
 | 3 | Maps: District wired in (colliders, meshes, spawns, fall respawn); the other maps one at a time | in progress (District done, see Step 3 progress) |
-| 4 | Tag rules, scoring, rounds, bots, HUD | done (see Step 4-5 wiring) |
-| 5 | Procedural 3D puppet, cosmetic ragdoll on stun / fall | done as faceless capsule + 6-part ragdoll (see Step 4-5 wiring) |
-| 6 | Supabase lobby + WebRTC host / guest netcode | |
+| 4-5 | Local tag rules, bots, HUD, cosmetic ragdolls | superseded: tag mode and bots removed; the cosmetic ragdoll stays (Step 6) |
+| 6 | Dedicated Node.js + Socket.IO server, join overlay, 30 Hz client-authoritative netcode, smoothed remote players, ragdoll respawn | done (see Step 6) |
+| next | Melee slash (Left-Click), KOs, hit validation | |
 
 ## Step 1 notes
 
@@ -160,7 +163,7 @@ Small mechanics that join the verbs together so a route never stops on a lip or 
   pitch sweeps and bandpass-swept noise bursts: jump (sine thump 210 -> 80 Hz), air jump (thump + rising chirp), wall-kick (thump + chirp + noise tick), wall-run attach (low sine click),
   dash (fast noise whoosh), grapple fire (whoosh + sawtooth / square metallic thwip, whether or not the shot hits). Two always-running noise loops only change gain / cutoff: slide hiss (bandpass, follows slide speed,
   only while sliding on the ground) and wind (lowpass, silent below 450 units / s, full at 850). Everything goes through a master gain and a compressor.
-  `stepPlayer` fills `state.sfx` (`'jump' | 'airjump' | 'kick' | 'attach' | 'dash' | 'grapple'`, cleared at the start of each step); main.js plays the human's events right after the step. Bots make no sound.
+  `stepPlayer` fills `state.sfx` (`'jump' | 'airjump' | 'kick' | 'attach' | 'dash' | 'grapple'`, cleared at the start of each step); main.js plays your events right after the step. Remote players make no sound.
 - **Not verified in a browser / with real Rapier.** `stepPlayer`'s mantle flow was exercised against a stub world (28 and 44 unit lips at 700 units / s: ends on top with the speed never below 700; a 60 unit wall does not
   mantle); the dip curve was checked numerically. The real ray / headroom / controller interplay and every sound's loudness and taste still need a play-test. Tune from `MANTLE`, `LAND` and the `SFX` table in `createAudio()`.
 
@@ -177,11 +180,11 @@ Small mechanics that join the verbs together so a route never stops on a lip or 
   On a player target `main.js` moves the anchor to their torso (`y + 0.9`) every tick; a downed target or a non-`play` mode releases the hook.
 - **Release:** `input.grapple` let go, `maxDuration`, torso within `detachDist` of the anchor, a dash press, or Space. Space gives `vy = max(vy, detachJumpBoost)` and the press is consumed, so
   it neither air-jumps nor wall-kicks; the next tick is a normal air-strafe / wall-run tick. Every release starts `cooldown` (`endGrapple`). A locked (stunned / countdown) player releases at once.
-- **Player snag:** reaching a player sets `grappleHit`; `main.js` (after `stepGameRules`) gives that player `stun = hitStun`, a horizontal shove away from the grappler (`max(hitShove, 0.6 * grappler speed)`) and ends their own hook.
+- **Player snag (not wired in the multiplayer client, see Step 6):** reaching a player sets `grappleHit`; `main.js` (after `stepGameRules`) gives that player `stun = hitStun`, a horizontal shove away from the grappler (`max(hitShove, 0.6 * grappler speed)`) and ends their own hook.
   It works the same for IT (tag set-up) and runners (sabotage / escape). state.js / rules.js are untouched: it only writes the existing `stun`, `vx`, `vz` fields, which the existing knock / ragdoll code already reads.
 - **Visuals / HUD:** `view.setGrapple(i, torso, anchor)` draws a thin glowing cylinder + hook ball per hooked player. The crosshair dot and the status line under it ("GRAPPLE READY" / cooldown seconds / "HOOKED")
   are created from `main.js` (`makeCrosshair`), so `index.html` did not change. The yellow tuning line also shows `GRAPPLE ready / GO / cooldown`.
-- **Not done:** bots never grapple (no `aim`), and the tether is cosmetic (no rope collision).
+- **Not done:** the tether is cosmetic (no rope collision); remote players cannot be hooked (they have no capsule in the multiplayer client).
 
 ## Step 3 progress (maps)
 
@@ -189,7 +192,7 @@ Small mechanics that join the verbs together so a route never stops on a lip or 
 |------|--------|
 | District colliders: floor slabs around the central pit, 42 boxes (16 floating), 4 pillars, 6 ramp wedges | map data done; `y0` consumer patch in world.js pending (see Step 3.1) |
 | District meshes: slabs (world-aligned grid), rim trims, boxes, pillars, ramps (the old building shaft + skyline are gone, see Rendering budget) | done |
-| Spawn at `DISTRICT_MAP.spawns`, fall below -12 m (ragdoll + respawn, see Step 4-5 wiring), `R` | done |
+| Spawn at `DISTRICT_MAP.spawns`, fall below -12 m (ragdoll + server respawn, see Step 6), `R` | done |
 | Arena, Large, Roof, Complex maps | |
 
 - **Shared geometry (`game/maps.js`):** `floorSlabs(map)` cuts the roof rect into non-overlapping slabs around the holes (12 slabs for District; slabs +
@@ -204,10 +207,10 @@ Small mechanics that join the verbs together so a route never stops on a lip or 
   2. Ground stick: while on a surface the move also asks for `MOVE.stick` (8 units) extra downward travel so the puppet stays glued when the surface falls away
      (ramp crest, small drop). Skipped the tick after a climb (pressing into a slope only costs climb), and the first 2 airborne ticks after leaving a surface still
      count as on it. Rapier's own snap-to-ground did not hold on a crest.
-- **Falling:** `hasFallen(ctx)` = feet below `MAP.fallY` (-480 units = -12 m). `main.js` then treats it as a fall (ragdoll tumbles into the void, the player reappears on their spawn after 1.2 s). `R` triggers the same
-  fall (it is a "stuck" button, so it is NOT a free escape from IT). `placePlayer` / `teleportPlayer`
+- **Falling:** `hasFallen(ctx)` = feet below `MAP.fallY` (-480 units = -12 m). `main.js` then treats it as a fall (a local ragdoll tumbles, `respawnReq` goes to the server, which answers with a clean spawn after 1.2 s). `R` triggers the same
+  fall (the same respawn request). `placePlayer` / `teleportPlayer`
   restore the standing capsule (a slide shrinks it) and `main.js` resets all movement state (`createPlayerState`).
-- **Spawn selection:** `MAP.spawn` (default 0) or `?spawn=N` in the page URL (0-5), e.g. `?spawn=2` drops YOU on the SE pocket (the spawn list is rotated so the bots take the other five). Faces the middle of the roof (the pit).
+- **Spawn selection (old single-player behaviour; the server picks spawns now, see Step 6):** `MAP.spawn` (default 0) or `?spawn=N` in the page URL (0-5), e.g. `?spawn=2` drops YOU on the SE pocket (the spawn list is rotated so the bots take the other five). Faces the middle of the roof (the pit).
 - **Rendering notes:** floor slabs share one grid texture with world-aligned offsets (5 m tiles) so lines run straight across slab seams; rim trims are visual
   only (a 14-unit coping strip on the roof edge and around each hole); there is no geometry outside the roof (the pit looks into the sky gradient + fog);
   the sun and its 1024 shadow map follow the focus point (`setFocus`: your capsule, or your ragdoll torso while you tumble).
@@ -248,7 +251,7 @@ Shadows / rim trims are unchanged. Floating boxes are normal `WALL_GROUP` collid
 | Spawns | 6, all `y = 0`, in the NE / SW / SE / NW pockets and the north / south rim, each >= 200 clear of every hole / obstacle footprint (min 222) |
 
 Known limits: the gauntlet exit pad is a head-on h115 face for a player wall-running straight at it (wall-kick or jump over it, or take the ramp from below); nothing here has been play-tested for
-speed tuning. Bots still have no pathfinding and do not use the new verticality.
+speed tuning.
 
 **Verification.** `validateMap(DISTRICT_MAP)` (exported from maps.js, pure data, no engine) checks: exports, shape and everything inside the rect, 3D box / box overlaps that respect `y0..h`,
 ramp / ramp, ramp / box (using the ramp height over the overlap), ramp / pillar, pillar overlaps, nothing standing in a hole (floating boxes may span it), slab + hole tiling, 6 spawns at `y = 0`
@@ -262,64 +265,54 @@ cp src/game/maps.js /tmp/maps.mjs && node -e "import('/tmp/maps.mjs').then(({DIS
 Last run: ok, 42 boxes (16 floating), 4 pillars, 6 ramps, 1 hole, 4 floor slabs, min spawn clearance 222, 12184 open ground cells, 0 pockets. Injected faults (box overlapping a skybridge, box in the pit,
 spawn off the floor, wall sealing a lane, overlapping ramp) are all reported.
 
-## Step 4-5 wiring (tag match, bots, ragdolls, HUD)
+## Step 6: multiplayer (server.js + src/main.js)
 
-Six players: `YOU` (index 0) + `BOT 1..5`. `createGameState({ spawns })`, `addPlayer` x6, `resetRoundPlayers(gs, spawnsM)`, then `mode = 'countdown'`
-(same as `startMatch`). Game state is in METRES; `DISTRICT_MAP.spawns` are old units, so `main.js` converts them once (`spawnsM`) before handing them to
-state.js, which re-uses them on every round reset. `state.js` and `rules.js` are unchanged.
+### Run / deploy
 
-**Per-player physics.** `world.js` keeps one shared Rapier world and one shared `KinematicCharacterController`. `addPlayerCapsule(ctx)` makes a kinematic capsule in
-`PLAYER_GROUP` (collides with the level only, never with other capsules or ragdolls) and returns a per-player VIEW `{ RAPIER, world, player }`. Every world.js helper
-and `stepPlayer(state, input, view)` take that view, so player.js needed no signature change. Use the base ctx for `stepWorld` and `spawnRagdoll`.
-World gravity is -24 m/s^2 but only the dynamic ragdoll bodies feel it; capsules stay kinematic and player.js still applies gameplay gravity.
+- **Local:** `npm install`, `npm run build`, `npm start` (http://localhost:3000). `npm run dev` runs Vite alone (no server): open `?server=http://localhost:3000` and start the server with
+  `CORS_ORIGIN=http://localhost:5173 npm start` so the socket may cross origins.
+- **Render.com (Web Service):** Build Command `npm install && npm run build`, Start Command `npm start`. Render injects `PORT`. `vite` lives in `dependencies` so the build works even when Render skips devDependencies.
+  Health check path: `/healthz`. Socket.IO uses WebSocket (polling fallback); the free tier sleeps when idle, so the first join after a pause is slow.
+- **Env:** `PORT` (default 3000), `MAX_PLAYERS` (default 6), `CORS_ORIGIN` (comma list, dev only).
+- Without a `dist/` build the server answers 503 with a hint instead of serving the raw `index.html` (it needs Vite to resolve `three` and the other bare imports).
 
-**Tick order (main.js `tick`, 60 Hz):**
-1. each player: input (human `readInput`, bot `botInput`, or `IDLE_INPUT` when locked), `stepPlayer` queues the kinematic move. `state.locked` = not `play` mode, or `stun > 0`, or downed;
-   locked players ignore input, so a knock plays out through normal friction / gravity (the human's input latches are still drained every tick).
-2. `stepWorld`: all capsules move, ragdolls tumble.
-3. capsules -> `gs.players[i]`: feet x / y / z, velocity, yaw, `sliding`, `dashing`, `runT`, `bhopChain`, `fell` (set for exactly one tick, rising edge for the fall penalty).
-4. `stepGameRules(gs, STEP)`.
-5. `gs` -> capsules: (a) a changed `vx / vz` means the rules knocked the player (tag, shove, trip): adopted into the movement state; (b) the position delta from
-   `collidePlayers` soft separation is applied with `nudgePlayer` (collision-aware, so it can not push a puppet into a wall); (c) a new `gs.round` re-places everyone
-   (`placeAll`); (d) ragdoll on / off (below).
+### Wire protocol (all positions in METRES, `yaw` in radians)
 
-**Bots (`botInput(gs, idx)` in main.js).** No pathfinding. IT bot: chase the nearest runner (leading its velocity slightly), occasional hop, dash when within 5.5 m.
-Runner bot: run straight away from IT with a sine weave, dash within 4.2 m (a dashing runner shoves IT, see rules.js). Both look 0.5 s ahead along their velocity and steer
-away from the roof edge and the pit, and un-stick themselves (barely moved in 0.5 s -> strafe + hop for 0.7 s).
+| Event | Dir | Payload | Notes |
+|-------|-----|---------|-------|
+| `join` | C -> S | `{ name, color }` | Name trimmed to 16 chars, colour is a 0xRRGGBB integer. Rejected with `full` above `MAX_PLAYERS`. |
+| `init` | S -> C | `{ id, spawn, players, serverTime }` | `spawn` = `{x,y,z}` picked from `DISTRICT_MAP.spawns * SCALE`, the farthest from every live player. `players` includes you (filter by `id`). A repeat `init` (re-join after a reconnect) resets the remote list. |
+| `playerJoined` | S -> others | public player `{ id, name, color, x..z, vx..vz, yaw, height, flags, ko, ping }` | |
+| `playerLeft` | S -> all | `id` | |
+| `timeSync` | C -> S | ack callback `cb(Date.now())` | Client times the round trip: `rtt = now - t0`, `clockOffset = serverTime + rtt / 2 - Date.now()`, keeping the quickest samples. Burst of 5 on connect, then every 2 s. `serverNow()` in main.js = `Date.now() + clockOffset`. |
+| `ping` | C -> S | `rtt` (ms, smoothed) | Shown on the scoreboard. |
+| `state` | C -> S (volatile) | `{ x,y,z, vx,vy,vz, yaw, height, sliding, dashing, wallRunning, grappleActive, grappleAnchor, ragdoll }` | 30 Hz (every 2nd sim tick). Server clamps ranges, ignores packets closer than 10 ms, nulls the anchor unless `grappleActive`. |
+| `snapshot` | S -> room (volatile) | `{ t, players: [{ id, ...dynamic fields, ko, ping }] }` | 30 Hz `setInterval(1000 / 30)`. Static info (name, colour) only travels in `init` / `playerJoined`. Clients drop snapshots with `t` older than the last one. |
+| `respawnReq` | C -> S | none | Sent on a fall below `MAP.fallY` or `R`. The server marks the player `ragdoll`, waits `RESPAWN_DELAY_MS` (1200 ms = the tumble) and then picks a clean spawn. Duplicates while pending are ignored. |
+| `respawn` | S -> C | `{ spawn }` | The client re-places the capsule, resets all movement state (`createPlayerState`) and faces the middle of the roof. |
 
-**Ragdoll lifecycle (cosmetic only; the capsule stays the single source of truth):**
-- `stun > 0` and no ragdoll: `spawnRagdoll(RAPIER, world, feet, velocity, knock impulse, { yaw })`, the capsule mesh is hidden, 6 meshes (`RAGDOLL_RIG` sizes, player colour, faceless)
-  follow the bodies each frame (`syncRagdollMeshes`). The capsule keeps moving under the knockback, so the ragdoll can end up a little away from it.
-- `stun` ends (or a new round starts): `despawnRagdoll`, capsule shown again.
-- Fall (feet below `MAP.fallY`) or `R`: ragdoll spawns where they fell, the capsule is parked on its spawn and stays hidden for `FALL_DOWN` = 1.2 s, and the rules see the
-  player at y = -1000 meanwhile (untaggable, no separation). `gs.fell` is raised for one tick, so rules.js hands them IT (fall penalty). After 1.2 s the ragdoll is removed and
-  the capsule appears on the spawn.
-- Chase camera: while YOUR ragdoll exists, `updateCamera` follows its torso (and the sun follows it); otherwise the capsule as before. The red IT cone follows the IT puppet's
-  torso while that puppet is ragdolling.
+### Client loop (main.js)
 
-**Puppets (render/scene.js).** `view.addPuppet(color)` returns `{ capsule, parts, setFeet, setHeight, showCapsule, showRagdoll }`. The capsule squashes with `state.height`
-(smooth, eased in player.js). One shared emissive red cone (`setItMarker`) hovers above whoever is IT. Geometry is shared by all puppets; each puppet owns one material.
+- **Your player:** `tick()` at 60 Hz: `readInput` -> `stepPlayer` -> `stepWorld` -> fall check -> every 2nd tick `sendState()`. No input prediction or reconciliation exists because nothing about you is simulated elsewhere.
+  Grapple aim is the camera ray through the crosshair (`aimFromCamera`). Only level geometry can be hooked: remote players have no capsule, so `GRAPPLE` player snags (`grappleHit`) never fire.
+- **Remote players:** one puppet each (`view.addPuppet(color)`; a puppet's colour is fixed, so puppets of leavers are pooled by colour and reused). Each frame `k = 1 - exp(-18 * dt)`:
+  position, `height` (-> `setHeight`, so slides squash) and `yaw` (shortest-angle) ease toward the latest snapshot. A gap above 20 m snaps (respawn, lag spike). `setYaw` is called if the puppet has one
+  (the faceless capsule does not need it; yaw only orients ragdolls).
+- **Grapple tethers:** `view.setGrapple(slot, torso, anchor)`. Slot 0 is you, slots 1-5 go to remotes (freed on leave). That is why the server caps the room at 6 by default. Before raising `MAX_PLAYERS`, check how many slots `scene.js` allocates.
+- **Ragdolls:** falling below `MAP.fallY` (`hasFallen`) or `R` -> `startFall()`: a local ragdoll tumbles where you fell, the capsule is parked on the last spawn and hidden, `state.ragdoll = true` is sent with the frozen fall position and velocity,
+  `respawnReq` goes out. Remotes see the flag flip and spawn their own cosmetic ragdoll at that position / velocity (`spawnRagdoll` / `despawnRagdoll`), so ragdolls are NOT synced bit for bit. When the flag drops, the ragdoll is removed and the puppet snaps to the new spawn.
+  If the server stays silent for 4 s you respawn locally (offline fallback). While the capsule is parked, input is locked (`state.locked`) but the latches still drain.
+- **Join flow:** the world and scene boot behind the overlay. Play saves name + colour to `localStorage` (`pf3d.name`, `pf3d.color`), requests PointerLock (inside the click so the browser allows it) and sends `join`; `init` hides the overlay.
+  After a socket reconnect the client re-joins automatically (new id, new spawn). A "DISCONNECTED" banner shows meanwhile. The HUD shows a "click to capture mouse" hint whenever the pointer is not locked during play.
+- **HUD:** top-left tuning line (speed, runT, bhop, dash, air jumps, grapple, wall-run, slide boost), bottom-left `PLAYERS n  PING ms`, centre crosshair + grapple status, toast line (join / leave / mute), `Tab` held = scoreboard (`Player | KOs | Ping`, KOs sorted descending).
+- **Input (`input.js`):** grapple = `KeyE` or right mouse (button 2), held; the grapple fires on the press edge inside `stepPlayer`. Left mouse (button 0) is latched as `attack` only while the pointer is locked, and nothing reads it yet (melee stage).
+  Key events from text inputs are ignored, so the name field accepts spaces.
 
-**HUD (index.html + main.js `updateHud`).** Top centre: round number, timer (red under 10 s), `TAG THEM!` (you are IT) / `RUN!`. Top right: live IT-time leaderboard (lowest IT time
-first = currently winning, IT marker, round wins), refreshed ~7x / s and only written to the DOM when it changed. Centre banner: countdown number, `GO!`, round winner
-(`roundend`), match winner (`matchend`, press Enter to start a new match via `startMatch`). Small toast line for tag / shove / trip / fall events (`drainEvents`, once per frame).
-Top left keeps the movement tuning line. Match settings (first to 3 round wins, 60 s rounds, 3 s countdown) are the `createGameState` defaults.
+### Known limits / next
 
-**Known limits / next:** bots have no pathfinding (they can get boxed in by the wall-run gauntlets, the stuck logic frees them); the ragdoll is not synced to the capsule while it tumbles;
-no title screen or lobby yet (the match starts straight into the countdown); pillar orbit is still not implemented (wall-run covers curving around pillars).
-
-## Sandbox / free-roam practice mode (main.js, index.html)
-
-`[G]` toggles **TAG MATCH (6 Players)** <-> **SANDBOX (Solo Free-Roam)**; `?sandbox=1` starts in the sandbox (the URL is kept in sync with `history.replaceState`).
-The bottom hint bar shows `[G] Mode: TAG / SANDBOX` with the active mode highlighted (`#modeTag` / `#modeSandbox`, updated in `updateHud`).
-
-| | TAG MATCH | SANDBOX |
-|---|---|---|
-| Bots (players 1..5) | simulated | parked far off the map (`PARK_POS`, `limbo = PARK`), not stepped, not rendered, not grapple targets (`skip`) |
-| `stepGameRules` | every tick | not run: no tags, shoves, trips, soft separation, IT time, timer, countdown, round / match end |
-| `gs.mode` / IT | rules own them | forced to `'play'` every tick, every `isIt = false`, `stun = 0` |
-| HUD | round, timer, status, leaderboard, banners | `SANDBOX` / `FREE ROAM`; timer, leaderboard and banners hidden |
-| `R` / falling off | fall = ragdoll + 1.2 s down + IT penalty | `sandboxRespawn()`: instant teleport to your spawn (`spawnsM[0]`), no ragdoll, no limbo, no penalty; all movement state, cooldowns and chains reset (`createPlayerState`), camera faces the middle |
-
-Switching to SANDBOX ends bot ragdolls, parks the capsules and respawns you. Switching back calls `startMatch(gs, spawnsM)` + `placeAll()` (fresh match: scores 0,
-countdown, bots back on their spawns). `state.js`, `rules.js` and the other files are untouched; the sandbox only gates the calls in `main.js`.
+- KOs are always 0 until melee exists. The server already carries a `ko` field per player and puts it in every snapshot.
+- Client-authoritative means a modified client can teleport or fake `ragdoll`. The melee stage should make the server (or the victim) the judge of melee hits, using `serverNow()`-stamped swings.
+- No lag compensation or extrapolation: remotes trail the real position by roughly one snapshot interval plus the smoothing lag (about 60-100 ms plus network).
+- One room, one map (District), no lobby, no names above heads, no spectating.
+- Not verified in a browser with real Rapier: server.js was exercised with a stub map and two socket clients (join, init, playerJoined, timeSync, ping, state -> snapshot, respawn delay and duplicate guard, playerLeft, /healthz, static fallback).
+  The client (`main.js`) was only syntax-checked; play-test the join flow, tether slots, ragdoll hand-off and smoothing.
