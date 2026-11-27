@@ -57,6 +57,15 @@ function updateRunT(s, inp, grounded) {
 // direction is below the (small) wish cap, so a wish direction that is sideways to the velocity keeps adding speed as the
 // velocity turns; flying straight along it adds nothing. There is no upper limit on the resulting speed.
 function airAccelerate(s, ax, az, wishSpeed) {
+  // air carving: rotate the existing horizontal velocity a small fraction (JUMP.airTurnRate * STEP) of the way toward the wish
+  // direction. A pure rotation, so the horizontal magnitude is preserved (it only aims the speed, it never adds or removes any).
+  const v = Math.hypot(s.vx, s.vz);
+  if (v > 1e-3 && JUMP.airTurnRate > 0) {
+    const ang = Math.atan2(s.vx * az - s.vz * ax, s.vx * ax + s.vz * az);   // signed angle from velocity to wish (about +y)
+    const r = ang * Math.min(1, JUMP.airTurnRate * STEP), cs = Math.cos(r), sn = Math.sin(r);
+    const vx = s.vx, vz = s.vz;
+    s.vx = vx * cs - vz * sn; s.vz = vz * cs + vx * sn;
+  }
   const add = Math.min(wishSpeed, m(JUMP.airWishCap)) - (s.vx * ax + s.vz * az);
   if (add <= 0) return;
   const a = Math.min(add, JUMP.airAccel * wishSpeed * STEP);
