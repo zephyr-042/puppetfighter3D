@@ -161,6 +161,15 @@ export const MELEE = {
   maxHp: 100,          // hit points of every pod
   regenDelay: 4,       // s (server) without taking damage before hit points come back
   regenRate: 8,        // hit points / s (server) once regeneration has started
+  // Slice M3: contextual Left-Click moves (no extra keys). Sliding + LMB = Slide Uppercut, falling (vy < -4 m / s) + LMB = Air Dive Slam.
+  uppercutUp: 520,     // old units / s (13.0 m / s): the Uppercut's vertical knock-up on a hit opponent (replaces the normal knockUp part)
+  uppercutPop: 220,    // old units / s (5.5 m / s): minimum upward speed YOU get from an uppercut (you rise out of the slide with it)
+  diveSpeed: 880,      // old units / s (22.0 m / s): downward speed held during an Air Dive until touchdown
+  diveRadius: 120,     // old units (3.0 m): radius of the shockwave ring on touchdown (measured to the target's capsule axis)
+  diveDmg: 45,         // damage of the shockwave (a regular block / parry / dodge still applies)
+  diveKnock: 560,      // old units / s (14 m / s): horizontal knockback of the shockwave, straight away from the impact point
+  diveKnockUp: 0.5,    // upward launch = diveKnockUp * the horizontal shockwave knockback
+  diveVertical: 80,    // old units (2.0 m): max vertical gap between the impact point (feet) and a target's feet for the shockwave to hit
   radiusPad: 14,       // old units (0.35 m, the pod radius): server adds this to `reach` because it measures to the capsule axis
   vertical: 88,        // old units (2.2 m): max vertical distance between the two capsule centres for a slash to connect
 };

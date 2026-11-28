@@ -5,6 +5,8 @@
 // MELEE (Step 1: Kinetic Slash) is the one thing the server JUDGES: a client only REQUESTS a 'slash' ({ dir, speed }); resolveSlash() below checks the cooldown, the
 // cleave cone, the reach and the vertical overlap against the positions it holds, scales damage / knockback with the (sanity-clamped) incoming speed, keeps hp /
 // ko / dead / lastHitBy per player, and tells everybody with 'hit' + 'killFeed'. Movement itself stays client-authoritative. The numbers come from src/config.js MELEE.
+// Slice M3: 'slash' carries a `type` ('slash' | 'uppercut' | 'slam'); an uppercut launches the victim (MELEE.uppercutUp), a 'slam' announces an Air Dive and the touchdown 'slam' {x,y,z} is judged here
+// (radius / vertical gap / damage / knockback from MELEE, dodge + parry respected through strike()), answered with 'slamFx' + 'hit'.
 // Run: `npm run build && npm start` (Render: build `npm install && npm run build`, start `npm start`).
 
 import express from 'express';
@@ -93,7 +95,7 @@ function pickSpawn(excludeId) {
 function placeAt(p, s) {
   p.x = s.x; p.y = s.y; p.z = s.z; p.vx = p.vy = p.vz = 0;
   p.ragdoll = false; p.grappleActive = false; p.grappleAnchor = null; p.sliding = p.dashing = p.wallRunning = false;
-  p.parrying = p.perfectParry = p.dodging = false;
+  p.parrying = p.perfectParry = p.dodging = false; p.divingAt = 0;
 }
 
 // ---- melee (server-authoritative) ----------------------------------------------------------------------------------------------------
@@ -103,7 +105,7 @@ const hSpeedUnits = (p) => Math.hypot(p.vx, p.vz) / SCALE;       // the player's
 
 // Pure judge: attacker `p` swings along data.dir with data.speed. Returns the list of hits (targets inside the cleave) with damage + knockback applied to
 // NOBODY yet: the caller applies them. `others` = candidate targets. Positions are the feet positions in metres from the last 'state' packets.
-function resolveSlash(p, data, others) {
+function resolveSlash(p, data, others, type = 'slash') {
   // aim: horizontal unit vector. Falls back to the facing the client last reported if the vector is missing / degenerate.
   const dr = data && typeof data.dir === 'object' && data.dir ? data.dir : {};
   let dx = num(dr.x, 0, 10), dz = num(dr.z, 0, 10);
@@ -117,7 +119,7 @@ function resolveSlash(p, data, others) {
   const t = clamp01((speed - MELEE.dmgSpeedMin) / (MELEE.dmgSpeedMax - MELEE.dmgSpeedMin));
   const damage = Math.round(lerp(MELEE.baseDmg, MELEE.maxDmg, t));
   const knock = lerp(MELEE.baseKnock, MELEE.maxKnock, t) * SCALE;           // m / s, horizontal
-  const knockVec = { x: r3(dx * knock), y: r3(knock * MELEE.knockUp), z: r3(dz * knock) };
+  const knockVec = { x: r3(dx * knock), y: r3(type === 'uppercut' ? MELEE.uppercutUp * SCALE : knock * MELEE.knockUp), z: r3(dz * knock) };   // uppercut: fixed 13 m / s launch
 
   const aCy = p.y + p.height / 2;
   const hits = [];
@@ -160,6 +162,37 @@ function creditKo(victim, cause) {
   return true;
 }
 
+// One melee strike (slash / uppercut / slam) of `p` against `q`, after the geometry has been checked: Phase-Dodge i-frames pass through ('dodged'), a perfect parry
+// negates it and staggers the attacker ('parried'), a regular block scales damage + knockback ('hit' + 'parried'), otherwise full damage ('hit'). Returns true if hp was lost.
+function strike(p, q, damage, knockVec, type, now) {
+  const tx = p.x - q.x, tz = p.z - q.z, tl = Math.hypot(tx, tz) || 1;           // from the defender toward the attacker
+  const point = { x: r3(q.x + tx / tl * 0.6), y: r3(q.y + q.height * 0.6), z: r3(q.z + tz / tl * 0.6) };   // where the blades meet
+  if (q.dodging) { io.to('game').emit('dodged', { attackerId: p.id, targetId: q.id }); return false; }
+  if (q.perfectParry) {
+    const k = PARRY.attackerKnock;
+    const attackerKnock = { x: r3(tx / tl * k), y: r3(k * MELEE.knockUp), z: r3(tz / tl * k) };
+    p.stunUntil = now + PARRY.attackerStun * 1000;
+    io.to('game').emit('parried', { defenderId: q.id, attackerId: p.id, perfect: true, point, attackerKnock, attackerStun: PARRY.attackerStun });
+    return false;
+  }
+  const blocked = !!q.parrying;
+  if (blocked) {
+    damage = Math.round(damage * PARRY.blockDmgMult);
+    knockVec = { x: r3(knockVec.x * PARRY.blockKnockMult), y: r3(knockVec.y * PARRY.blockKnockMult), z: r3(knockVec.z * PARRY.blockKnockMult) };
+  }
+  q.hp = Math.max(0, q.hp - damage);
+  q.lastHitBy = p.id; q.lastHitAt = now; q.lastDamageAt = now;
+  const kill = q.hp <= 0;
+  io.to('game').emit('hit', { attackerId: p.id, targetId: q.id, damage, knockVec, kill, hp: q.hp, blocked, type });
+  if (blocked) io.to('game').emit('parried', { defenderId: q.id, attackerId: p.id, perfect: false, point });
+  if (kill) {
+    q.dead = true;
+    creditKo(q, type === 'slam' ? 'slam' : 'slash');
+    scheduleRespawn(q, KO_RESPAWN_MS);
+  }
+  return true;
+}
+
 io.on('connection', (socket) => {
   const id = socket.id;
   const p = {
@@ -168,6 +201,7 @@ io.on('connection', (socket) => {
     sliding: false, dashing: false, wallRunning: false, grappleActive: false, grappleAnchor: null, ragdoll: false,
     ko: 0, ping: 0, lastState: 0, respawnPending: false,
     hp: MAX_HP, maxHp: MAX_HP, dead: false, lastHitBy: null, lastHitAt: 0, lastDamageAt: 0, lastSlash: 0,
+    slidingAt: 0, divingAt: 0,                                                                             // Slice M3: last time the client reported sliding / announced an Air Dive
     parrying: false, perfectParry: false, dodging: false, parryStart: 0, dodgeStart: 0, stunUntil: 0,   // Slice M2: guard / Phase-Dodge flags (validated in 'state'), rising-edge times, attacker stagger
   };
   players.set(id, p);
@@ -203,7 +237,7 @@ io.on('connection', (socket) => {
     p.vx = num(d.vx, p.vx, 300); p.vy = num(d.vy, p.vy, 300); p.vz = num(d.vz, p.vz, 300);
     p.yaw = num(d.yaw, p.yaw, 100);
     p.height = Math.max(0.5, Math.min(2.5, num(d.height, p.height, 5)));
-    p.sliding = !!d.sliding; p.dashing = !!d.dashing; p.wallRunning = !!d.wallRunning;
+    p.sliding = !!d.sliding; if (p.sliding) p.slidingAt = now; p.dashing = !!d.dashing; p.wallRunning = !!d.wallRunning;
     p.grappleActive = !!d.grappleActive;
     const a = d.grappleAnchor;
     p.grappleAnchor = p.grappleActive && a && typeof a === 'object' ? { x: num(a.x, 0, 1000), y: num(a.y, 0, 1000), z: num(a.z, 0, 1000) } : null;
@@ -226,40 +260,36 @@ io.on('connection', (socket) => {
     if (now < p.stunUntil) return;                                                  // staggered by a perfect parry
     if (now - p.lastSlash < MELEE.cooldown * 1000 - SLASH_SLACK_MS) return;          // cooldown gate (client enforces the exact 0.55 s)
     p.lastSlash = now;
-    const res = resolveSlash(p, d, joinedPlayers());
+    // contextual move: an uppercut is only believed shortly after the client reported sliding; 'slam' = an Air Dive started (the damage comes with the touchdown 'slam')
+    const type = d.type === 'slam' ? 'slam' : d.type === 'uppercut' && now - p.slidingAt < 400 ? 'uppercut' : 'slash';
+    if (type === 'slam') {
+      p.divingAt = now;
+      socket.to('game').emit('slashFx', { id, yaw: r3(Math.atan2(num(d.dir && d.dir.x, 0, 10), num(d.dir && d.dir.z, 1, 10))), type });
+      return;
+    }
+    const res = resolveSlash(p, d, joinedPlayers(), type);
     // everybody else sees the swing (hit or miss): blade sweep + whoosh. `yaw` = the slash direction.
-    socket.to('game').emit('slashFx', { id, yaw: r3(Math.atan2(res.dx, res.dz)) });
-    for (const h of res.hits) {
-      const q = h.target;
-      const tx = p.x - q.x, tz = p.z - q.z, tl = Math.hypot(tx, tz) || 1;           // from the defender toward the attacker
-      const point = { x: r3(q.x + tx / tl * 0.6), y: r3(q.y + q.height * 0.6), z: r3(q.z + tz / tl * 0.6) };   // where the blades meet
-      if (q.dodging) {                                                          // Phase-Dodge i-frames: the slash passes through, no damage, no knockback
-        io.to('game').emit('dodged', { attackerId: id, targetId: q.id });
-        continue;
-      }
-      if (q.perfectParry) {                                                     // perfect parry: defender untouched, attacker staggered + shoved back
-        const k = PARRY.attackerKnock;
-        const attackerKnock = { x: r3(tx / tl * k), y: r3(k * MELEE.knockUp), z: r3(tz / tl * k) };
-        p.stunUntil = now + PARRY.attackerStun * 1000;
-        io.to('game').emit('parried', { defenderId: q.id, attackerId: id, perfect: true, point, attackerKnock, attackerStun: PARRY.attackerStun });
-        continue;
-      }
-      let damage = h.damage, knockVec = h.knockVec;
-      const blocked = !!q.parrying;                                             // regular block: reduced damage + knockback
-      if (blocked) {
-        damage = Math.round(damage * PARRY.blockDmgMult);
-        knockVec = { x: r3(knockVec.x * PARRY.blockKnockMult), y: r3(knockVec.y * PARRY.blockKnockMult), z: r3(knockVec.z * PARRY.blockKnockMult) };
-      }
-      q.hp = Math.max(0, q.hp - damage);
-      q.lastHitBy = id; q.lastHitAt = now; q.lastDamageAt = now;
-      const kill = q.hp <= 0;
-      io.to('game').emit('hit', { attackerId: id, targetId: q.id, damage, knockVec, kill, hp: q.hp, blocked });
-      if (blocked) io.to('game').emit('parried', { defenderId: q.id, attackerId: id, perfect: false, point });
-      if (kill) {
-        q.dead = true;
-        creditKo(q, 'slash');
-        scheduleRespawn(q, KO_RESPAWN_MS);
-      }
+    socket.to('game').emit('slashFx', { id, yaw: r3(Math.atan2(res.dx, res.dz)), type });
+    for (const h of res.hits) strike(p, h.target, h.damage, h.knockVec, type, now);
+  });
+
+  // Air Dive touchdown { x, y, z } (feet): the shockwave. Only valid within 5 s of a 'slash' of type 'slam'. Everybody within MELEE.diveRadius (ground plane) and
+  // MELEE.diveVertical (feet) of the impact point is hit: damage + outward / upward knockback, through strike() so dodges and parries apply.
+  socket.on('slam', (d) => {
+    if (!p.joined || p.dead || p.ragdoll || p.respawnPending || !d || typeof d !== 'object') return;
+    const now = Date.now();
+    if (!p.divingAt || now - p.divingAt > 5000) return;
+    p.divingAt = 0;
+    let x = num(d.x, p.x, 1000), y = num(d.y, p.y, 1000), z = num(d.z, p.z, 1000);
+    if (Math.hypot(x - p.x, z - p.z) > 6 || Math.abs(y - p.y) > 6) { x = p.x; y = p.y; z = p.z; }   // the claim must be near where the server last saw you (state packets are 30 Hz)
+    io.to('game').emit('slamFx', { attackerId: id, x: r3(x), y: r3(y), z: r3(z) });
+    const R = MELEE.diveRadius * SCALE, V = MELEE.diveVertical * SCALE, knock = MELEE.diveKnock * SCALE;
+    for (const q of joinedPlayers()) {
+      if (q.id === id || q.dead || q.ragdoll || q.respawnPending) continue;
+      const dx = q.x - x, dz = q.z - z, dist = Math.hypot(dx, dz);
+      if (dist > R || Math.abs(q.y - y) >= V) continue;
+      const ux = dist > 0.05 ? dx / dist : Math.sin(p.yaw), uz = dist > 0.05 ? dz / dist : Math.cos(p.yaw);
+      strike(p, q, MELEE.diveDmg, { x: r3(ux * knock), y: r3(knock * MELEE.diveKnockUp), z: r3(uz * knock) }, 'slam', now);
     }
   });
 

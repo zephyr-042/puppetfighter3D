@@ -108,6 +108,8 @@ const SLASH = { p0: 0.12, p1: 0.62, trailSegs: 28, trailOut: ORBIT_R + BLADE.len
 // guard stance (Slice M2): the blade hovers across the FRONT of the pod, pointing along pod-local +X; the energy barrier is a curved shield panel in front
 const GUARD = { x: -0.7, y: 1.05, z: 0.62, yaw: Math.PI / 2, arc: Math.PI * 0.85, r: 0.95, h: 1.55, blue: new THREE.Color(0x4d8dff), cyan: new THREE.Color(0x00f5d4), ease: 18, colEase: 28 };
 
+const UPPER = { x: -0.3 };                                                  // uppercut: lateral offset (pod-local, right shoulder) of the vertical sweep plane
+
 const _yawQ = new THREE.Quaternion(), _tiltQ = new THREE.Quaternion(), _axis = new THREE.Vector3(), _up = new THREE.Vector3();
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
 const sstep = (a, b, x) => { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
@@ -167,7 +169,7 @@ function makeTrail(color) {
 //   setSpeed(units / s)  horizontal speed -> blade charge glow + streak;   setLean(x, z)  target lean (world-space, |l| <= JUICE.tiltMax rad, the pod leans toward +l, pivoting about its FEET, eased)
 //   setMode('pod' | 'ragdoll' | 'hidden')                              - 'ragdoll': ragdoll.js drives `pod` (syncRagdollMeshes(rag, puppet.pod, out)); setFeet / setYaw are then not called
 //   setGuard(0 | 1 | 2)  parry guard: 0 = down, 1 = regular block (soft blue barrier), 2 = PERFECT parry window (bright cyan); the blade snaps horizontally in front of the pod
-//   setAttack(p)  p in 0..1 = swing progress (1 - attackT / MELEE.attackTime), -1 = no swing;   flash(power)  hit flash;   update(dt)  called by view.update(dt)
+//   setAttack(p, type)  p in 0..1 = swing progress (1 - attackT / MELEE.attackTime), -1 = no swing; type 'uppercut' = the vertical, rolled low -> high sweep (Slice M3), anything else the horizontal slash;   flash(power)  hit flash;   update(dt)  called by view.update(dt)
 function createPuppet(scene, color) {
   const { capsuleGeo, ringGeo, bladeGeo } = getGeos();
   const total = m(PUPPET.height), radius = m(PUPPET.radius), cyl = Math.max(total - 2 * radius, 0);
@@ -214,6 +216,7 @@ function createPuppet(scene, color) {
 
   let fx = 0, fy = 0, fz = 0, curH = total, yaw = 0, mode = 'pod', attackP = -1, flashT = 0, flashPow = 1, t = Math.random() * 10;
   let leanX = 0, leanZ = 0, leanTX = 0, leanTZ = 0, spdT = 0, spdS = 0;     // lean (current / target) and horizontal speed in units / s (target / smoothed)
+  let attackType = 'slash';                                                   // 'slash' | 'uppercut' | 'slam' (only 'uppercut' animates differently)
   let guardState = 0, guardA = 0, guardC = 0;                                // guard: requested state (0 / 1 / 2), eased 0..1 amount, eased 0..1 'perfect' colour mix
   const phase = Math.random() * 6.28;
   // pod pose = lean * yaw, pivoting about the FEET: the centre sits curH / 2 up the leaned axis, so the soles stay planted while the top leans into the run
@@ -280,6 +283,7 @@ function createPuppet(scene, color) {
     // blade pose (idle hover, or the slash timeline)
     const k = curH / total, bob = Math.sin(t * 2.3 + phase);
     const p = attackP;
+    let upOn = 0, upPhi = 0, rollB = 0;                                       // Uppercut pose blend (0..1) / elevation angle / blade roll
     let th = ARC_HALF, yawB = BLADE.idleYaw + 0.04 * bob, pitchB = BLADE.idlePitch + 0.05 * bob, py = BLADE.pivot[1] + 0.035 * bob, stretch = 1, u = -1, fade = 0;
     if (p >= 0 && p < 1) {
       const wind = sstep(0, SLASH.p0, p), rec = sstep(SLASH.p1, 1, p), on = wind * (1 - rec);
@@ -291,9 +295,18 @@ function createPuppet(scene, color) {
       py = BLADE.pivot[1] + (py - BLADE.pivot[1]) * (1 - on);
       stretch = 1 + (0.18 + 0.12 * fast) * on;                            // a charged blade stretches a little more
       fade = 1 - sstep(SLASH.p1, SLASH.p1 + SLASH.trailFade, p);
+      if (attackType === 'uppercut') {                                    // vertical slash: stay on the idle pose here, the rolled low -> high sweep is blended in below
+        upOn = on; upPhi = p <= SLASH.p1 ? -ARC_HALF + 2 * ARC_HALF * u : ARC_HALF;
+        th = ARC_HALF; yawB = BLADE.idleYaw + 0.04 * bob; pitchB = BLADE.idlePitch + 0.05 * bob; py = BLADE.pivot[1] + 0.035 * bob; stretch = 1 + (0.18 + 0.12 * fast) * on;
+      }
     }
     let bx = -Math.sin(th) * ORBIT_R, bz = Math.cos(th) * ORBIT_R;
     // guard stance: the blade glides to a horizontal position across the front (not while a swing is running: the slash drops the guard anyway)
+    if (upOn > 0) {                                                           // Uppercut: the hilt orbits a vertical circle in front of the right shoulder, blade radial and rolled 90 degrees
+      const ux = UPPER.x, uy = BLADE.pivot[1] + Math.sin(upPhi) * ORBIT_R, uz = Math.cos(upPhi) * ORBIT_R;
+      bx += (ux - bx) * upOn; bz += (uz - bz) * upOn; py += (uy - py) * upOn;
+      pitchB += (-upPhi - pitchB) * upOn; yawB += (0 - yawB) * upOn; rollB = (Math.PI / 2) * upOn;
+    }
     const gk = 1 - Math.exp(-GUARD.ease * dt), gc = 1 - Math.exp(-GUARD.colEase * dt);
     guardA += ((guardState > 0 ? 1 : 0) - guardA) * gk;
     guardC += ((guardState === 2 ? 1 : 0) - guardC) * gc;
@@ -303,7 +316,7 @@ function createPuppet(scene, color) {
       py += (GUARD.y - py) * gw; yawB += (GUARD.yaw - yawB) * gw; pitchB *= (1 - gw);
     }
     bladeRig.position.set(bx, py * k, bz);
-    bladeRig.rotation.set(pitchB, yawB, 0, 'YXZ');
+    bladeRig.rotation.set(pitchB, yawB, rollB, 'YXZ');
     bladeRig.scale.set(1, k, stretch);
 
     // guard barrier: fades in with the guard, bright cyan during the perfect window, a soft pulsing blue after it
@@ -318,6 +331,8 @@ function createPuppet(scene, color) {
     // crescent trail: drawn behind the blade (u = how far the blade has swept), fading with distance and after the sweep ends
     if (u >= 0 && fade > 0.001) {
       trail.visible = true; trail.position.y = BLADE.pivot[1] * k;
+      const upper = attackType === 'uppercut';                            // the crescent stands up in the YZ plane for an uppercut (sweeps low -> high)
+      trail.rotation.z = upper ? Math.PI / 2 : 0; trail.position.x = upper ? UPPER.x : 0;
       const a = trailCol.array, n = SLASH.trailSegs;
       for (let i = 0; i <= n; i++) {
         const ui = i / n, age = u - ui;
@@ -342,7 +357,7 @@ function createPuppet(scene, color) {
       leanTX = x * s; leanTZ = z * s;
     },
     setMode,
-    setAttack(v) { attackP = v; },
+    setAttack(v, type) { attackP = v; if (type) attackType = type; },
     setGuard(v) { guardState = v | 0; },
     flash(power = 1) { flashT = FLASH_TIME; flashPow = power; },
     update
@@ -570,7 +585,24 @@ export function createScene() {
   // ---- puppets: every pod is registered here so view.update(dt) can animate the floating blades, slash trails and hit flashes
   const puppets = [];
   function addPuppet(color) { const pu = createPuppet(scene, color); puppets.push(pu); return pu; }
-  function update(dt) { for (const pu of puppets) pu.update(dt); }
+  // ---- shockwave rings (Air Dive Slam): a cyan ring + a gold inner ring + a faint disc expand over `dur` s to `radius` m on the floor, then remove themselves
+  const shockRingGeo = new THREE.RingGeometry(0.8, 1, 64).rotateX(-Math.PI / 2), shockDiscGeo = new THREE.CircleGeometry(1, 48).rotateX(-Math.PI / 2);
+  const shocks = [];
+  function spawnShockwave(x, y, z, radius, dur = 0.3) {
+    const mk = (geo, hex) => { const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: hex, transparent: true, opacity: 0, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false, fog: false })); mesh.position.set(x, y + 0.06, z); mesh.scale.setScalar(0.05); mesh.frustumCulled = false; mesh.renderOrder = 4; scene.add(mesh); return mesh; };
+    shocks.push({ t: 0, dur, radius, ring: mk(shockRingGeo, 0x00f5d4), inner: mk(shockRingGeo, 0xffb000), disc: mk(shockDiscGeo, 0x00f5d4) });
+  }
+  function updateShocks(dt) {
+    for (let i = shocks.length - 1; i >= 0; i--) {
+      const sw = shocks[i]; sw.t += dt;
+      const kk = Math.min(1, sw.t / sw.dur), e = 1 - Math.pow(1 - kk, 3), fade = Math.pow(1 - kk, 1.4);
+      sw.ring.scale.setScalar(Math.max(0.05, sw.radius * e)); sw.ring.material.opacity = 0.95 * fade;
+      sw.inner.scale.setScalar(Math.max(0.05, sw.radius * e * 0.72)); sw.inner.material.opacity = 0.8 * fade;
+      sw.disc.scale.setScalar(Math.max(0.05, sw.radius * e)); sw.disc.material.opacity = 0.22 * fade;
+      if (kk >= 1) { for (const o of [sw.ring, sw.inner, sw.disc]) { scene.remove(o); o.material.dispose(); } shocks.splice(i, 1); }
+    }
+  }
+  function update(dt) { for (const pu of puppets) pu.update(dt); updateShocks(dt); }
 
-  return { renderer, scene, camera, addPuppet, update, setItMarker, setFocus, setGrapple };
+  return { renderer, scene, camera, addPuppet, update, spawnShockwave, setItMarker, setFocus, setGrapple };
 }

@@ -34,6 +34,9 @@ export function createPlayerState() {
            grappleActive: false, grappleAnchor: { x: 0, y: 0, z: 0 }, grappleTarget: -1, grappleT: 0, grappleCd: 0, grapplePrev: false,
            grappleHit: -1,     // grappleHit: index of a player the hook just reached (main.js consumes it: shove + stun)
            mantleT: 0,         // s left of the mantle forward-step window (see MANTLE)
+           attackType: 'slash', // Slice M3: what the current / last Left-Click was: 'slash' | 'uppercut' (sliding) | 'slam' (falling); drives the blade animation + the server request
+           diving: false,      // Air Dive in progress: vy is held at -MELEE.diveSpeed until touchdown
+           slamLanded: false,  // set on the tick the dive touches down; main.js emits 'slam' to the server and clears it
            attackT: 0, attackCd: 0, attackYaw: 0,                  // melee: s left of the blade swing (MELEE.attackTime), cooldown (MELEE.cooldown), yaw the pod faces during the swing
            lungeT: 0, lungeX: 0, lungeZ: 1, lungeV: 0, lungePre: 0, // magnetic lunge: s left, direction, lunge speed (m / s), the momentum to hand back afterwards (m / s)
            stunT: 0,           // s left of hit-stun (set by applyKnockback): input ignored, knockback plays out
@@ -64,7 +67,7 @@ export function applyKnockback(s, kx, ky, kz, stun = MELEE.hitStun) {
   s.vx += kx; s.vz += kz;
   s.vy = Math.max(s.vy, 0) + ky;
   s.stunT = Math.max(s.stunT, stun);
-  s.lungeT = 0; s.dashT = 0; s.sliding = false; s.wallRunning = false; s.mantleT = 0; s.bhopTimer = 0;
+  s.lungeT = 0; s.dashT = 0; s.sliding = false; s.wallRunning = false; s.mantleT = 0; s.bhopTimer = 0; s.diving = false;
   if (s.grappleActive) endGrapple(s);
 }
 
@@ -117,6 +120,7 @@ export function stepPlayer(s, inp, ctx) {
   if (s.locked) inp = IDLE_INPUT;                             // stunned / frozen: no steering, jumps, dashes or slides (knockback keeps its velocity)
   s.sfx.length = 0;                                           // this tick's sound events (main.js plays them right after the step)
   const grounded = ctx.player.grounded;
+  if (s.diving && grounded) { s.diving = false; s.slamLanded = true; }   // Air Dive touchdown: main.js sends 'slam' (the server owns the shockwave)
   // A landing needs a real stretch in the air. Rapier's grounded flag can drop for a single tick while running on flat
   // ground (the resting push into the floor is smaller than the controller's skin), and that must not open a b-hop window.
   const landed = grounded && !s.wasGrounded && s.airT >= BHOP.minAir;
@@ -251,6 +255,8 @@ export function stepPlayer(s, inp, ctx) {
     }
   }
 
+  if (s.diving && (launched || s.wallRunning || grappling)) s.diving = false;   // a jump / kick / wall catch / hook ends the dive
+
   // ---- dash (F): locks a horizontal direction for DASH.duration at DASH.speed (or the current speed if that is higher)
   if (inp.dash && s.dashCd <= 0 && s.dashT <= 0) {
     let dx = inp.ax, dz = inp.az;
@@ -291,12 +297,22 @@ export function stepPlayer(s, inp, ctx) {
       }
     }
 
+    // contextual move: sliding -> Uppercut (rising slash), falling -> Air Dive Slam, otherwise the normal slash
+    let type = 'slash';
+    if (s.sliding) type = 'uppercut';
+    else if (!grounded && s.vy < -4 && !grappling && !s.wallRunning) type = 'slam';
+    s.attackType = type;
+    if (type === 'uppercut') {                                // clear the slide into a rising pop (the forward lunge below still applies)
+      s.sliding = false; s.vy = Math.max(s.vy, m(MELEE.uppercutPop)); launched = true; s.coyote = 0;
+    } else if (type === 'slam') {                             // dive: straight down at diveSpeed until touchdown (any dash is cancelled)
+      s.diving = true; s.vy = -m(MELEE.diveSpeed); s.dashT = 0;
+    }
     s.parryT = 0;                                             // swinging drops the guard
     s.attackT = MELEE.attackTime; s.attackCd = MELEE.cooldown; s.attackYaw = Math.atan2(dirX, dirZ);
     s.sfx.push('slash');
-    s.slashEvt = { dirX, dirZ, speed: Math.min(pre / SCALE, 2000) };
+    s.slashEvt = { dirX, dirZ, speed: Math.min(pre / SCALE, 2000), type };   // type 'slam' only announces the dive to the server: the damage comes with 'slam' on touchdown
 
-    if (!dashing && !grappling && !s.wallRunning) {
+    if (!dashing && !grappling && !s.wallRunning && type !== 'slam') {
       const lv = Math.max(m(MELEE.lungeSpeed), pre);
       let dur = MELEE.lungeDuration;
       if (lockDist >= 0) dur = Math.min(dur, Math.max(0, (lockDist - m(MELEE.standOff)) / lv));   // stop standOff short of the locked target
@@ -374,6 +390,7 @@ export function stepPlayer(s, inp, ctx) {
 
   // ---- vertical: stick to the ground, otherwise gravity (light while dashing, heavier on the way down than up)
   if (launched) { /* takeoff tick: move with the full impulse */ }
+  else if (s.diving) s.vy = -m(MELEE.diveSpeed);               // Air Dive: held at full dive speed until touchdown
   else if (s.wallRunning) {                                   // light gravity, and the fall speed is clamped
     s.vy = Math.max(s.vy - m(WALLRUN.wallGrav) * STEP, -m(WALLRUN.maxFall));
   }
@@ -430,6 +447,7 @@ export function stepPlayer(s, inp, ctx) {
       s.vy = Math.max(s.vy, m(MANTLE.popSpeed));
     }
   }
+  if (mantled) s.diving = false;
   s.wallHit = !mantled && want > m(RUN.wallMinSpeed) * STEP && got < want * RUN.wallRatio;
   if (s.wallHit) { s.bhopTimer = 0; if (grounded) s.bhopChain = 0; }   // slamming into a wall ends the b-hop window
   // blocked: the speed into the obstacle is gone. Keep only the motion the controller actually allowed (the slide along

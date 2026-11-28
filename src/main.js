@@ -14,6 +14,8 @@
 // speed-charged blade + pod lean (fed to the puppets every frame), and impact juice (0.045 s hit-stop freeze of camera + blade animation and a camera shake when you land a heavy hit / KO).
 // Slice M2 (parry / dodge): Right-Click raises the guard (stance + barrier in scene.js); the SERVER judges every slash against the target's guard / dodge flags and answers with 'dodged' /
 // 'parried' (+ the usual 'hit' for a regular block). A perfect parry: clang, hit-stop + shake, the defender's dash / grapple cooldowns reset, the attacker is shoved back + staggered.
+// Slice M3 (contextual sword moves): Left-Click while sliding = Slide Uppercut (launches the victim 13 m/s up), while falling (vy < -4) = Air Dive Slam: stepPlayer dives at 22 m/s, sets
+// `slamLanded` on touchdown, we send 'slam' {x,y,z}; the server judges the 3 m shockwave and answers 'slamFx' (ring + shake + bass thump here) + 'hit'.
 // Audio: createAudio() below is a zero-asset Web Audio synth (oscillator sweeps + filtered noise), unlocked by the first click / keypress, [M] mutes.
 // Loads after: everything
 
@@ -112,6 +114,7 @@ function createAudio(toast) {                                   // toast(msg): o
                 tone('square', 1250, 320, 0.07, 0.06 + 0.05 * v); tone('triangle', 880, 2400, 0.05, 0.05 * v, 0.012); },        // metallic ring
     phase(v)  { noise('bandpass', 4200, 600, 1.4, 0.24, 0.30 * v); tone('sine', 1900, 420, 0.16, 0.14 * v);                           // Phase-Dodge: crisp falling whoosh
                 tone('triangle', 520, 1500, 0.12, 0.08 * v, 0.03); noise('highpass', 6000, 9000, 0.7, 0.07, 0.07 * v); },              // + a rising shimmer
+    slam(v)   { tone('sine', 95, 24, 0.55, 0.55 * v); noise('lowpass', 1800, 110, 0.8, 0.45, 0.34 * v); tone('triangle', 240, 48, 0.30, 0.22 * v); noise('bandpass', 2600, 500, 1.0, 0.16, 0.18 * v, 0.01); tone('sawtooth', 780, 120, 0.22, 0.07 * v); },   // heavy bass thump + crunch + metallic ring-out
     parry(v)  { noise('bandpass', 1200, 3800, 1.4, 0.10, 0.16 * v); tone('triangle', 420, 880, 0.10, 0.10 * v); },                       // guard raised: short rising swish
     clang(v)  { tone('square', 1720, 1690, 0.38, 0.13 * v); tone('triangle', 2650, 2600, 0.30, 0.10 * v); tone('sine', 3910, 3880, 0.24, 0.07 * v);   // inharmonic metal partials
                 tone('sawtooth', 980, 940, 0.20, 0.07 * v); noise('highpass', 3500, 9000, 0.8, 0.07, 0.30 * v); tone('sine', 160, 70, 0.12, 0.22 * v); },   // + strike click + body
@@ -145,7 +148,7 @@ async function boot() {
   let hitStopT = 0, shakeAmp = 0, dodgeFlashT = 0, xhairFlashing = false, flashDur = JUICE.dodgeFlash, flashCol = '#bff6ff', flashGlow = '#00e5ff', flashGlow2 = '#7fe9ff';   // Slice M1: hit-stop freeze (s), camera shake impulse (m), crosshair dodge flash (s)
   const toast = (msg, t = 1.6) => { el.toast.textContent = msg; toastT = t; };
   const hint = document.createElement('div');               // controls hint (bottom left); index.html is not touched
-  hint.textContent = 'LMB Slash | RMB Parry | E Grapple | Q/F Dodge';
+  hint.textContent = 'LMB Slash (sliding: Uppercut | falling: Slam) | RMB Parry | E Grapple | Q/F Dodge';
   hint.style.cssText = 'position:fixed;left:14px;bottom:12px;font:600 12px/1.2 system-ui,sans-serif;letter-spacing:.06em;color:rgba(255,255,255,.72);text-shadow:0 1px 3px #000;pointer-events:none;z-index:5;white-space:nowrap';
   document.body.appendChild(hint);
 
@@ -290,7 +293,7 @@ async function boot() {
       tgt: { x: p.x, y: p.y, z: p.z, yaw: p.yaw, height: p.height || m(PUPPET.height) },
       vel: { x: 0, y: 0, z: 0 }, grappleActive: false, anchor: null, ragdoll: false, rag: null,
       torso: { x: 0, y: 0, z: 0 }, tp: { x: 0, y: 0, z: 0 },
-      hp: p.hp === undefined ? MELEE.maxHp : p.hp, dead: !!p.dead, attackT: 0, attackYaw: 0, guard: 0,        // attackT / attackYaw: their slash swing ('slashFx')
+      hp: p.hp === undefined ? MELEE.maxHp : p.hp, dead: !!p.dead, attackT: 0, attackYaw: 0, attackType: 'slash', guard: 0,        // attackT / attackYaw: their slash swing ('slashFx')
     };
     r.puppet.setMode('pod'); r.puppet.setAttack(-1); r.puppet.setGuard(0);
     remotes.set(p.id, r);
@@ -362,7 +365,7 @@ async function boot() {
       pu.setFeet(c.x, c.y, c.z); pu.setHeight(c.height);
       if (r.attackT > 0) c.yaw += angDiff(c.yaw, r.attackYaw) * (1 - Math.exp(-40 * dt));       // face the slash direction while the blade sweeps
       pu.setYaw(c.yaw);
-      pu.setAttack(r.attackT > 0 ? Math.min(0.999, 1 - r.attackT / MELEE.attackTime) : -1);
+      pu.setAttack(r.attackT > 0 ? Math.min(0.999, 1 - r.attackT / MELEE.attackTime) : -1, r.attackType);
       pu.setGuard(r.guard);
       pu.setSpeed(Math.hypot(r.vel.x, r.vel.z) / SCALE);                // their blade glows with THEIR speed: you can read a fully charged (75 damage) opponent
       const L = leanTarget(r.vel.x, r.vel.z, r.dashing); pu.setLean(L.x, L.z);
@@ -453,16 +456,16 @@ async function boot() {
       const t = document.createElement('span'); t.textContent = name;
       nm.append(sw, t); return nm;
     };
-    const ic = document.createElement('span'); ic.className = 'ic'; ic.textContent = k.cause === 'void' ? 'VOID' : 'SLASH';
+    const ic = document.createElement('span'); ic.className = 'ic'; ic.textContent = k.cause === 'void' ? 'VOID' : k.cause === 'slam' ? 'SLAM' : 'SLASH';
     row.append(who(k.killerName, k.killerColor), ic, who(k.victimName, k.victimColor));
     el.feed.prepend(row);
     while (el.feed.children.length > 5) el.feed.lastChild.remove();
     setTimeout(() => row.remove(), 5600);
   }
-  socket.on('slashFx', ({ id, yaw }) => {                   // somebody else swung (hit or miss): blade sweep + whoosh
+  socket.on('slashFx', ({ id, yaw, type }) => {                   // somebody else swung (hit or miss): blade sweep + whoosh
     const r = remotes.get(id);
     if (!joined || !r || r.rag) return;
-    r.attackT = MELEE.attackTime; r.attackYaw = yaw;
+    r.attackT = MELEE.attackTime; r.attackYaw = yaw; r.attackType = type || 'slash';
     audio.play('slash', soundVol(r.cur) * 0.8);
   });
   socket.on('hit', ({ attackerId, targetId, damage, knockVec, kill, hp }) => {
@@ -513,6 +516,14 @@ async function boot() {
       toast('PARRIED!  staggered', 1.0);
       if (!awaiting && !tumbling && attackerKnock) applyKnockback(me, attackerKnock.x, attackerKnock.y, attackerKnock.z, attackerStun || PARRY.attackerStun);
     }
+  });
+  socket.on('slamFx', ({ attackerId, x, y, z }) => {        // Air Dive shockwave (everybody sees it, hit or not): expanding ring, camera shake, bass thump
+    if (!joined) return;
+    view.spawnShockwave(x, y, z, m(MELEE.diveRadius), 0.3);
+    const mine = attackerId === myId, f = feetPos(pv), near = mine ? 1 : Math.max(0, 1 - Math.hypot(x - f.x, z - f.z) / 25);
+    audio.play('slam', mine ? 1 : Math.max(0.1, near));
+    if (near > 0.05) shakeAmp = Math.max(shakeAmp, JUICE.shakeKO * (0.35 + 0.65 * near));
+    if (mine) hitStopT = Math.max(hitStopT, JUICE.hitStop);
   });
   socket.on('killFeed', (k) => {
     if (!joined) return;
@@ -592,7 +603,11 @@ async function boot() {
     for (const e of me.sfx) { audio.play(e); if (e === 'dash' && localPuppet) localPuppet.flash(0.35); }   // a pulse on the pod marks the i-frames
     if (me.slashEvt) {                                      // the swing started: ask the server to judge it (it owns cooldown, cone, reach, damage)
       const e = me.slashEvt; me.slashEvt = null;
-      if (socket.connected) socket.emit('slash', { dir: { x: r3(e.dirX), z: r3(e.dirZ) }, speed: Math.round(e.speed) });
+      if (socket.connected) socket.emit('slash', { dir: { x: r3(e.dirX), z: r3(e.dirZ) }, speed: Math.round(e.speed), type: e.type });
+    }
+    if (me.slamLanded) {                                    // Air Dive touched down: the server judges the shockwave at this point (feet)
+      me.slamLanded = false;
+      if (socket.connected) { const f = feetPos(pv); socket.emit('slam', { x: r3(f.x), y: r3(f.y), z: r3(f.z) }); }
     }
     if (!down && !wasOnGround && pv.player.grounded && me.vy < 0) triggerLandDip(rig, me.vy);   // me.vy is still the touchdown speed here
 
@@ -703,7 +718,7 @@ async function boot() {
         localPuppet.setFeet(f.x, f.y, f.z); localPuppet.setHeight(me.height);
         localYaw += angDiff(localYaw, swinging ? me.attackYaw : me.facing) * (1 - Math.exp(-(swinging ? 40 : 14) * dt));
         localPuppet.setYaw(localYaw);
-        localPuppet.setAttack(swinging ? Math.min(0.999, (MELEE.attackTime - me.attackT + acc) / MELEE.attackTime) : -1);
+        localPuppet.setAttack(swinging ? Math.min(0.999, (MELEE.attackTime - me.attackT + acc) / MELEE.attackTime) : -1, me.attackType);
         localPuppet.setGuard(me.parryT > 0 ? (me.parryElapsed <= PARRY.perfectWindow ? 2 : 1) : 0);
         localPuppet.setSpeed(Math.hypot(me.vx, me.vz) / SCALE);            // blade charge glow + streak follow your horizontal speed
         const L = me.dodgeT > 0 ? leanTarget(me.dashX, me.dashZ, true) : leanTarget(me.vx, me.vz, false);   // lean into the run, fully into a dodge
