@@ -254,7 +254,11 @@ export function stepPlayer(s, inp, ctx) {
       const v0 = Math.hypot(s.vx, s.vz);
       s.vx += inp.ax * m(JUMP.doubleJumpDir); s.vz += inp.az * m(JUMP.doubleJumpDir);
       const v1 = Math.hypot(s.vx, s.vz);
-      if (v1 < v0 && v1 > 1e-6) { s.vx *= v0 / v1; s.vz *= v0 / v1; }   // a snap-turn redirects, it does not brake
+      // Clamp to max(entry speed, BHOP.maxSpeed): already flying faster (wall-kick / grapple, e.g. 680) keeps that speed and just snap-turns,
+      // but a flat-ground air jump can never push you past the BHOP.maxSpeed tier (520). Never brakes either (v1 < v0 is scaled back up to v0).
+      const cap = Math.max(v0, m(BHOP.maxSpeed));
+      if (v1 > cap) { s.vx *= cap / v1; s.vz *= cap / v1; }
+      else if (v1 < v0 && v1 > 1e-6) { s.vx *= v0 / v1; s.vz *= v0 / v1; }   // a snap-turn redirects, it does not brake
     }
   }
 

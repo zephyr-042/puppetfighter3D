@@ -40,8 +40,8 @@ export const JUMP = {
   // the speed ALONG that direction is below airWishCap, so strafing with the mouse turn keeps adding speed (no top limit).
   doubleJumpImpulse: 320, // upward speed of the air jump, units / s
   maxAirJumps: 1,      // air jumps available after leaving the ground; refilled on the ground and while wall-running
-  doubleJumpDir: 70,   // units / s: crisp impulse toward the held keys on an air jump (never lowers horizontal speed)
-  airWishCap: 42,      // units / s: the wish speed used for the "how much more can I add" check (small = strafing matters)
+  doubleJumpDir: 40,   // units / s: crisp impulse toward the held keys on an air jump (never lowers horizontal speed; the result is capped at max(entry speed, BHOP.maxSpeed), see player.js)
+  airWishCap: 28,      // units / s: the wish speed used for the "how much more can I add" check (small = strafing matters)
   airAccel: 13,        // acceleration factor: max added per tick = airAccel * runSpeed * dt (still limited by the cap check)
   airTurnRate: 2.6,    // 1 / s: while W (input.fwd) is held in the air, this fraction per second (x STEP per tick) of the angle between the velocity and
                        // the wish direction (the camera-relative keys) is rotated away, keeping the horizontal speed (Titanfall-style look-steering; 0 = pure Source strafing)
