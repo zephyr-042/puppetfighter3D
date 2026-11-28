@@ -5,73 +5,117 @@
 // speed-charged (blade glow 0.6 -> 2.4 and a longer glow streak as horizontal speed climbs 300 -> 760 units / s, i.e. toward the full 75 damage slash) and leans up to 0.22 rad into its
 // movement / dodge direction. The pod is also the ragdoll: when the pod tumbles, physics/ragdoll.js drives this very same `pod` group (one rigid capsule, no limbs), so nothing ever shape-shifts.
 // Also the red "IT" cone marker and the glowing grapple tether (setGrapple).
-// LOOK: sleek cinematic cyber-dusk (Mirror's Edge Catalyst / Ghostrunner / Titanfall 2). A low amber sun, a midnight-to-sunset sky gradient, dark
-// architectural materials and "runner vision" emissive accents (cyan wall-run strips, amber billboard faces, gold pad / speed-ramp edges, beacon rings
-// on towers and pillars). No background geometry at all (no skyline, facade or street): just the dusk sky gradient and a slate horizon fog.
+// LOOK: bright, crisp, sunlit architecture (Mirror's Edge / Overwatch). A clear morning sky gradient, light horizon mist, balanced daylight (cool hemisphere fill + a warm-white
+// sun high in the sky), true-to-life palette colours and PROCEDURAL surface textures generated once at startup (poured-concrete floor with expansion seams, brushed panel texture on
+// every box / ramp). Runner-vision accents are now PAINTED architectural bands (white / deep-cobalt stripes on wall-run panels, white face panels on billboards, teal bands on
+// spires and pillars, gold chevrons on the speed ramps): ordinary matte standard materials, nothing emissive. No background geometry at all: just the sky gradient and the mist.
 // Meshes are built from the same map data and helpers (game/maps.js) as the physics colliders, so they always match.
-// Accent strips are collected into a handful of InstancedMesh batches (one draw call per colour / shape, no shadows) to keep District at 60+ FPS.
+// Accent bands are collected into a handful of InstancedMesh batches (one draw call per colour / shape, no shadows) to keep District at 60+ FPS.
 // Loads after: config.js, game/maps.js
 
 import * as THREE from 'three';
 import { m, PUPPET, CAM, MAP, JUICE } from '../config.js';
 import DISTRICT_MAP, { PALETTE, floorSlabs, rampSpan, boxSpan } from '../game/maps.js';
 
-// ---- look tuning (everything the dusk mood depends on lives here) -------------------------------------------------------------
-const TRIM_COLOR = 0x8d99ae, TILE_M = 5;                                   // silver-grey coping trim; floor grid tile (metres): gives a sense of speed
-const SKY_STOPS = [[0, '#090d16'], [0.34, '#1a2436'], [0.66, '#e06d53'], [1, '#ffb07c']];   // zenith midnight slate -> steel blue -> coral -> amber horizon (screen space, top -> bottom)
-const FOG = { color: 0x262b3d, near: 180, far: 950 };                       // atmospheric horizon fog (metres)
-const SUN = { color: 0xffcfa8, intensity: 2.1, offset: [62, 34, 22] };      // warm golden-amber, ~27 degrees above the horizon: long cinematic shadows
-const HEMI = { sky: 0x6c88b5, ground: 0x1b202b, intensity: 1.1 };           // cool slate-blue bounce
-const GLOW = { cyan: 0x00e5ff, amber: 0xff7b29, gold: 0xffaa00 };           // runner-vision accents
-const GLOW_INTENSITY = 1.8;
-const STRIP_PROUD = 0.06;                                                   // strip thickness along the face normal (half of it stands proud of the surface)
+// ---- look tuning (everything the daylight mood depends on lives here) --------------------------------------------------------
+const TRIM_COLOR = 0xaeb9c5, TILE_M = 5, PANEL_M = 2.5;                    // light steel coping trim; floor grid tile (metres); panel texture tile on boxes / ramps (metres)
+const SKY_STOPS = [[0, '#4b92db'], [0.5, '#9ecfff'], [1, '#e8f3fc']];      // zenith blue -> mid-sky -> pale horizon mist (screen space, top -> bottom)
+const FOG = { color: 0xdbeaf7, near: 240, far: 1150 };                      // light atmospheric horizon mist (metres)
+const SUN = { color: 0xfffcf5, intensity: 1.65, offset: [34, 70, 24] };     // warm-white sun, ~60 degrees up: short, crisp shadows
+const HEMI = { sky: 0xf0f7ff, ground: 0x8a96a3, intensity: 1.85 };          // cool daylight fill: shadowed faces stay clean and readable
+const EXPOSURE = 0.9;                                                       // used only with the neutral tone mapper (hue-preserving highlight roll-off); see createScene
+const PAINT = { white: 0xf8fafc, cobalt: 0x1e3a8a, teal: 0x14b8a6, gold: 0xb45309 };   // painted accent colours (gold = deep saffron, so chevrons read on the saffron ramps)
+const STRIP_PROUD = 0.06;                                                   // band thickness along the face normal (half of it stands proud of the surface)
 
 // map colours are [r, g, b] in 0-255 (sRGB)
 const rgb = (c) => new THREE.Color().setRGB(c[0] / 255, c[1] / 255, c[2] / 255, THREE.SRGBColorSpace);
 
-// Finish per palette entry: [roughness, metalness]. Metalness stays modest because there is no environment map (metals only light up under the sun).
+// Finish per palette entry: [roughness, metalness]. Everything is matte-ish architecture; metalness stays low because there is no environment map.
 const SURFACE = new Map([
-  [PALETTE.DECK, [0.55, 0.30]],      // gunmetal steel
-  [PALETTE.COVER, [0.90, 0.05]],     // weathered slate concrete
-  [PALETTE.BRIDGE, [0.35, 0.35]],    // light titanium
-  [PALETTE.BILL, [0.70, 0.10]],      // charcoal frame
-  [PALETTE.WALL, [0.60, 0.20]],      // carbon-blue panels
-  [PALETTE.PAD, [0.55, 0.35]],       // industrial iron
-  [PALETTE.SPEED, [0.55, 0.35]],     // industrial iron
-  [PALETTE.TOWER, [0.80, 0.20]],     // matte obsidian steel
-  [PALETTE.PILLAR, [0.80, 0.20]]
+  [PALETTE.DECK, [0.70, 0.12]],      // slate platform
+  [PALETTE.COVER, [0.90, 0.00]],     // limestone / concrete
+  [PALETTE.BRIDGE, [0.50, 0.15]],    // titanium white
+  [PALETTE.BILL, [0.60, 0.08]],      // coral painted steel
+  [PALETTE.WALL, [0.60, 0.08]],      // cobalt panels
+  [PALETTE.PAD, [0.55, 0.12]],       // saffron
+  [PALETTE.SPEED, [0.55, 0.12]],     // saffron
+  [PALETTE.TOWER, [0.70, 0.18]],     // slate-charcoal
+  [PALETTE.PILLAR, [0.70, 0.18]]
 ]);
 const surface = (c) => SURFACE.get(c) || [0.85, 0.10];
 
-// One shared material per colour, so 70-odd meshes do not mean 70 materials.
-const matCache = new Map();
-function matFor(c) {
-  const [roughness, metalness] = surface(c);
-  const key = c.join(',') + '|' + roughness + '|' + metalness;
-  if (!matCache.has(key)) matCache.set(key, new THREE.MeshStandardMaterial({ color: rgb(c), roughness, metalness }));
-  return matCache.get(key);
-}
+// ---- procedural textures: drawn once, zero external image assets -----------------------------------------------------------
+const makeRnd = (seed) => () => (seed = (seed * 16807) % 2147483647) / 2147483647;     // tiny deterministic PRNG: same look every load
 
-// Floor texture: dark brushed architectural concrete with a subtle metallic expansion-joint line on every tile border, drawn once and
-// reused (cloned per slab for its own repeat / offset). The brushed grain wraps around the tile edges so the tile stays seamless.
+// Poured architectural concrete: light grey, fine surface grain, crisp dark-slate expansion seams on the tile border (and a faint half-tile guide).
 function makeFloorTexture() {
-  const S = 256;
+  const S = 256, rnd = makeRnd(1337);
   const cv = document.createElement('canvas'); cv.width = cv.height = S;
   const g = cv.getContext('2d');
-  g.fillStyle = '#1e232b'; g.fillRect(0, 0, S, S);
-  let seed = 1337; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;     // tiny deterministic PRNG: same floor every load
-  for (let i = 0; i < 520; i++) {
-    const x = rnd() * S, y = rnd() * S, len = 30 + rnd() * 120, a = 0.015 + rnd() * 0.03;
-    g.fillStyle = rnd() < 0.5 ? 'rgba(255,255,255,' + a.toFixed(3) + ')' : 'rgba(0,0,0,' + (a * 1.6).toFixed(3) + ')';
-    g.fillRect(x, y, len, 1);
-    if (x + len > S) g.fillRect(x - S, y, len, 1);                                           // wrap horizontally
+  g.fillStyle = '#c8d0d8'; g.fillRect(0, 0, S, S);
+  for (let i = 0; i < 2600; i++) {                                                           // grain: tiny light / dark speckles
+    const x = rnd() * S, y = rnd() * S, a = 0.03 + rnd() * 0.05;
+    g.fillStyle = rnd() < 0.5 ? 'rgba(255,255,255,' + a.toFixed(3) + ')' : 'rgba(110,122,136,' + a.toFixed(3) + ')';
+    g.fillRect(x, y, 1 + (rnd() < 0.2 ? 1 : 0), 1);
   }
-  g.fillStyle = 'rgba(44,51,63,0.35)'; g.fillRect(0, S / 2, S, 1); g.fillRect(S / 2, 0, 1, S);   // faint half-tile guide
-  g.fillStyle = '#12161c'; g.fillRect(0, 2, S, 1); g.fillRect(2, 0, 1, S);                   // joint groove (inner shadow)
-  g.fillStyle = '#2c333f'; g.fillRect(0, 0, S, 2); g.fillRect(0, 0, 2, S);                   // expansion-joint line on the tile border
+  for (let i = 0; i < 40; i++) {                                                             // a few soft trowel marks
+    const x = rnd() * S, y = rnd() * S, r = 14 + rnd() * 34;
+    g.fillStyle = 'rgba(255,255,255,0.025)'; g.beginPath(); g.arc(x, y, r, 0, 6.283); g.fill();
+  }
+  g.fillStyle = 'rgba(154,165,177,0.35)'; g.fillRect(0, S / 2, S, 1); g.fillRect(S / 2, 0, 1, S);   // faint half-tile guide
+  g.fillStyle = '#9aa5b1'; g.fillRect(0, 0, S, 2); g.fillRect(0, 0, 2, S);                   // expansion seam on the tile border
+  g.fillStyle = 'rgba(255,255,255,0.45)'; g.fillRect(0, 2, S, 1); g.fillRect(2, 0, 1, S);    // lit edge just inside the seam
   const t = new THREE.CanvasTexture(cv);
   t.wrapS = t.wrapT = THREE.RepeatWrapping; t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4;
   return t;
+}
+
+// Brushed architectural panel: near-white (so the palette colour of each material shows true when it multiplies in), fine horizontal brushed grain, a crisp horizontal
+// seam at the top of the tile + a lighter mid seam, and a vertical panel joint. Tiled in world space by scaleBoxUV (one tile = PANEL_M metres).
+let panelTexCache = null;
+function getPanelTexture() {
+  if (panelTexCache) return panelTexCache;
+  const S = 256, rnd = makeRnd(4242);
+  const cv = document.createElement('canvas'); cv.width = cv.height = S;
+  const g = cv.getContext('2d');
+  g.fillStyle = '#f2f4f6'; g.fillRect(0, 0, S, S);
+  for (let i = 0; i < 900; i++) {                                                            // brushed grain: long, thin, near-horizontal streaks
+    const x = rnd() * S, y = rnd() * S, len = 24 + rnd() * 110, a = 0.02 + rnd() * 0.035;
+    g.fillStyle = rnd() < 0.5 ? 'rgba(255,255,255,' + a.toFixed(3) + ')' : 'rgba(90,100,112,' + a.toFixed(3) + ')';
+    g.fillRect(x, y, len, 1);
+    if (x + len > S) g.fillRect(x - S, y, len, 1);                                           // wrap so the tile stays seamless
+  }
+  g.fillStyle = 'rgba(70,80,92,0.22)'; g.fillRect(0, S / 2, S, 1);                           // mid seam: subtle
+  g.fillStyle = 'rgba(70,80,92,0.55)'; g.fillRect(0, 0, S, 2); g.fillRect(0, 0, 2, S);       // panel seams: horizontal + vertical joint
+  g.fillStyle = 'rgba(255,255,255,0.55)'; g.fillRect(0, 2, S, 1); g.fillRect(2, 0, 1, S);    // lit edge under the seam
+  const t = new THREE.CanvasTexture(cv);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping; t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4;
+  return (panelTexCache = t);
+}
+
+// BoxGeometry UVs run 0..1 per face. Rescale them so one texture tile is `tile` metres on EVERY face (world-space texel density, any box size).
+// Face order of BoxGeometry: +x, -x, +y, -y, +z, -z (4 vertices each). w / h / d = full size in metres.
+function scaleBoxUV(geo, w, h, d, tile) {
+  const uv = geo.attributes.uv, dims = [[d, h], [d, h], [w, d], [w, d], [w, h], [w, h]];
+  for (let f = 0; f < 6; f++) for (let k = 0; k < 4; k++) {
+    const i = f * 4 + k;
+    uv.setXY(i, uv.getX(i) * dims[f][0] / tile, uv.getY(i) * dims[f][1] / tile);
+  }
+  uv.needsUpdate = true;
+}
+function scaleUV(geo, k) {                                                   // extruded ramp UVs are in metres already: just 1 / tile
+  const uv = geo.attributes.uv;
+  for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) * k, uv.getY(i) * k);
+  uv.needsUpdate = true;
+}
+
+// One shared material per colour, so 70-odd meshes do not mean 70 materials. `textured` = the brushed panel texture (boxes, ramps); pillars stay plain.
+const matCache = new Map();
+function matFor(c, textured = true) {
+  const [roughness, metalness] = surface(c);
+  const key = c.join(',') + '|' + roughness + '|' + metalness + '|' + (textured ? 't' : 'p');
+  if (!matCache.has(key)) matCache.set(key, new THREE.MeshStandardMaterial({ color: rgb(c), roughness, metalness, map: textured ? getPanelTexture() : null }));
+  return matCache.get(key);
 }
 
 // Solid ramp wedge: the side profile (low edge y0, high edge y1, flat bottom at span.base) extruded across the ramp width,
@@ -370,30 +414,33 @@ export function createScene() {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.shadowMap.enabled = true;
+  // Bright 1.85 hemisphere + 1.65 sun can push light surfaces past white. The neutral tone mapper (three r162+) rolls highlights off WITHOUT shifting hues, so the palette stays
+  // true. Older three builds simply skip it (the guard), and EXPOSURE is the single knob to turn the whole image down.
+  if (THREE.NeutralToneMapping !== undefined) { renderer.toneMapping = THREE.NeutralToneMapping; renderer.toneMappingExposure = EXPOSURE; }
   document.body.appendChild(renderer.domElement);
 
   const scene = new THREE.Scene();
-  // cinematic dusk sky: a screen-space gradient (zenith at the top of the screen, horizon glow at the bottom), see SKY_STOPS
+  // clear morning sky: a screen-space gradient (zenith at the top of the screen, pale horizon mist at the bottom), see SKY_STOPS
   const sky = document.createElement('canvas'); sky.width = 2; sky.height = 512;
   const sg = sky.getContext('2d'), grad = sg.createLinearGradient(0, 0, 0, 512);
   for (const [stop, col] of SKY_STOPS) grad.addColorStop(stop, col);
   sg.fillStyle = grad; sg.fillRect(0, 0, 2, 512);
   const skyTex = new THREE.CanvasTexture(sky); skyTex.colorSpace = THREE.SRGBColorSpace;
   scene.background = skyTex;
-  scene.fog = new THREE.Fog(FOG.color, FOG.near, FOG.far);          // slate atmospheric horizon haze (metres)
+  scene.fog = new THREE.Fog(FOG.color, FOG.near, FOG.far);          // light atmospheric horizon mist (metres)
 
-  // far = 400 m: the roof is ~120 m x 85 m and there is no background geometry, so nothing lives beyond that
+  // far = 400 m: the roof is ~115 m x 80 m and there is no background geometry, so nothing lives beyond that
   const camera = new THREE.PerspectiveCamera(CAM.fov, window.innerWidth / window.innerHeight, 0.1, 400);
 
   // lights: the sun follows the player (see setFocus) so one shadow map covers the area around you
-  scene.add(new THREE.HemisphereLight(HEMI.sky, HEMI.ground, HEMI.intensity));   // cool slate bounce: shadowed faces keep their shape
-  const sun = new THREE.DirectionalLight(SUN.color, SUN.intensity);               // low golden-amber sun: long shadows off towers, walls and runners
+  scene.add(new THREE.HemisphereLight(HEMI.sky, HEMI.ground, HEMI.intensity));   // cool daylight fill: shadowed faces keep their colour and shape
+  const sun = new THREE.DirectionalLight(SUN.color, SUN.intensity);               // warm-white sun high in the sky: crisp, short shadows
   sun.castShadow = true;
   sun.shadow.mapSize.set(1024, 1024);                  // 1024 keeps District at 60+ FPS (was 4096)
   const sc = sun.shadow.camera;
   sc.left = -45; sc.right = 45; sc.top = 45; sc.bottom = -45; sc.near = 1; sc.far = 200;
   sun.shadow.bias = -0.0004;
-  sun.shadow.normalBias = 0.03;                        // a low sun grazes every surface: this keeps the acne away
+  sun.shadow.normalBias = 0.03;                        // keeps the acne away on grazing faces
   scene.add(sun); scene.add(sun.target);
 
   const map = DISTRICT_MAP;
@@ -405,15 +452,15 @@ export function createScene() {
     const tex = floorTex.clone(); tex.needsUpdate = true;
     tex.repeat.set(W / TILE_M, D / TILE_M);
     tex.offset.set(((m(s.x - s.hw)) / TILE_M) % 1, (-(D + m(s.z - s.hd)) / TILE_M) % 1);
-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(W, ft, D), new THREE.MeshStandardMaterial({ map: tex, roughness: 0.82, metalness: 0.05 }));
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(W, ft, D), new THREE.MeshStandardMaterial({ map: tex, roughness: 0.88, metalness: 0.0 }));
     mesh.position.set(m(s.x), -ft / 2, m(s.z));
     mesh.castShadow = false;                                           // the floor never needs to cast: nothing is under it
     mesh.receiveShadow = true;
     scene.add(mesh);
   }
 
-  // ---- rim trims: a crisp silver-grey coping strip (map.rect.lip wide) along the roof edge and around every skylight hole. Visual only.
-  const lip = m(map.rect.lip), TH = 0.05, trimMat = new THREE.MeshStandardMaterial({ color: TRIM_COLOR, roughness: 0.4, metalness: 0.2 });
+  // ---- rim trims: a crisp light-steel coping strip (map.rect.lip wide) along the roof edge and around every skylight hole. Visual only.
+  const lip = m(map.rect.lip), TH = 0.05, trimMat = new THREE.MeshStandardMaterial({ color: TRIM_COLOR, roughness: 0.5, metalness: 0.1 });
   const trim = (x0, x1, z0, z1) => {                                   // metres, axis-aligned rectangle on the floor
     const t = new THREE.Mesh(new THREE.BoxGeometry(x1 - x0, TH, z1 - z0), trimMat);
     t.position.set((x0 + x1) / 2, TH / 2, (z0 + z1) / 2); t.castShadow = false; t.receiveShadow = true; scene.add(t);
@@ -427,15 +474,15 @@ export function createScene() {
     trim(x0 - lip, x0, z0, z1); trim(x1, x1 + lip, z0, z1);                             // west / east of the hole
   }
 
-  // ---- runner-vision accent strips: collected here, drawn as a few InstancedMesh batches at the end (no shadows, no extra materials per strip)
-  const glow = { box: { cyan: [], amber: [], gold: [] }, cyl: { cyan: [], amber: [] } };
+  // ---- painted accent bands: collected here, drawn as a few InstancedMesh batches at the end (no shadows, no extra materials per band)
+  const glow = { box: { white: [], cobalt: [], teal: [], gold: [] }, cyl: { teal: [], white: [] } };
   const gM = new THREE.Matrix4(), gP = new THREE.Vector3(), gS = new THREE.Vector3(), gQ = new THREE.Quaternion(), gE = new THREE.Euler();
   // kind 'box' = unit cube scaled to (sx, sy, sz); kind 'cyl' = unit cylinder scaled to (radius, height, radius). Centre (x, y, z) in metres.
   const strip = (kind, key, x, y, z, sx, sy, sz, q) => {
     gM.compose(gP.set(x, y, z), q || gQ.identity(), gS.set(sx, sy, sz));
     glow[kind][key].push(gM.clone());
   };
-  // a flat strip on a long face: u = offset along the box's long axis, n = offset along the face normal (both from the box centre)
+  // a flat band on a long face: u = offset along the box's long axis, n = offset along the face normal (both from the box centre)
   const onFace = (longX, cx, cz, u, y, n, su, sy, sn, key) => {
     if (longX) strip('box', key, cx + u, y, cz + n, su, sy, sn); else strip('box', key, cx + n, y, cz + u, sn, sy, su);
   };
@@ -443,81 +490,94 @@ export function createScene() {
   function accentBox(b) {
     const sp = boxSpan(b), cx = m(b.x), cz = m(b.z), cy = m(sp.cy), hx = m(b.hw), hz = m(b.hd), H = m(sp.height), top = m(sp.top);
     if (b.c === PALETTE.WALL) {
-      // wall-run panels: a cyan crown line, a cyan run-height line and cyan end posts on BOTH faces, so a wall reads from either lane
+      // wall-run panels: a white crown line, a deep-cobalt band under it, a white run-height line and white end posts on BOTH faces, so a wall reads from either lane
       const longX = hx >= hz, L = longX ? hx : hz, T = longX ? hz : hx;
       for (const side of [-1, 1]) {
         const n = side * T;
-        onFace(longX, cx, cz, 0, top - 0.14, n, 2 * L - 0.5, 0.14, STRIP_PROUD, 'cyan');
-        onFace(longX, cx, cz, 0, top * 0.36, n, 2 * L - 0.5, 0.08, STRIP_PROUD, 'cyan');
-        for (const end of [-1, 1]) onFace(longX, cx, cz, end * (L - 0.14), top / 2, n, 0.12, top - 0.5, STRIP_PROUD, 'cyan');
+        onFace(longX, cx, cz, 0, top - 0.14, n, 2 * L - 0.5, 0.14, STRIP_PROUD, 'white');
+        onFace(longX, cx, cz, 0, top - 0.52, n, 2 * L - 0.5, 0.46, STRIP_PROUD * 0.8, 'cobalt');
+        onFace(longX, cx, cz, 0, top * 0.36, n, 2 * L - 0.5, 0.08, STRIP_PROUD, 'white');
+        for (const end of [-1, 1]) onFace(longX, cx, cz, end * (L - 0.14), top / 2, n, 0.12, top - 0.5, STRIP_PROUD, 'white');
       }
     } else if (b.c === PALETTE.BILL) {
-      // billboards: a glowing sunset-amber face panel inside the charcoal frame, both sides
+      // billboards: a clean white face panel inside the coral frame, both sides
       const longX = hx >= hz, L = longX ? hx : hz, T = longX ? hz : hx;
-      for (const side of [-1, 1]) onFace(longX, cx, cz, 0, cy, side * T, 2 * L * 0.94, H * 0.72, STRIP_PROUD, 'amber');
+      for (const side of [-1, 1]) onFace(longX, cx, cz, 0, cy, side * T, 2 * L * 0.94, H * 0.72, STRIP_PROUD, 'white');
     } else if (b.c === PALETTE.TOWER) {
-      // spire beacon rings near the top: cyan above, amber below (a band a hair wider than the shaft)
-      strip('box', 'cyan', cx, top - 0.55, cz, 2 * hx + 0.07, 0.16, 2 * hz + 0.07);
-      strip('box', 'amber', cx, top - 1.05, cz, 2 * hx + 0.07, 0.10, 2 * hz + 0.07);
-    } else if (b.c === PALETTE.SPEED && (b.y0 || 0) > 0) {
-      // spire cap: one molten-gold band round the cap
-      strip('box', 'gold', cx, cy, cz, 2 * hx + 0.07, H * 0.4, 2 * hz + 0.07);
+      // spire bands near the top: a wide teal band above, a slim white one below (a hair wider than the shaft)
+      strip('box', 'teal', cx, top - 0.55, cz, 2 * hx + 0.07, 0.16, 2 * hz + 0.07);
+      strip('box', 'white', cx, top - 1.05, cz, 2 * hx + 0.07, 0.10, 2 * hz + 0.07);
     } else if (b.c === PALETTE.PAD) {
-      // launch pad: molten-gold strips along the four top edges
+      // launch pad: white painted strips along the four top edges
       const y = top + 0.02, w = 0.14, ix = 0.18;
-      strip('box', 'gold', cx, y, cz - hz + ix, 2 * hx - 2 * ix, 0.05, w);
-      strip('box', 'gold', cx, y, cz + hz - ix, 2 * hx - 2 * ix, 0.05, w);
-      strip('box', 'gold', cx - hx + ix, y, cz, w, 0.05, 2 * hz - 2 * ix);
-      strip('box', 'gold', cx + hx - ix, y, cz, w, 0.05, 2 * hz - 2 * ix);
+      strip('box', 'white', cx, y, cz - hz + ix, 2 * hx - 2 * ix, 0.05, w);
+      strip('box', 'white', cx, y, cz + hz - ix, 2 * hx - 2 * ix, 0.05, w);
+      strip('box', 'white', cx - hx + ix, y, cz, w, 0.05, 2 * hz - 2 * ix);
+      strip('box', 'white', cx + hx - ix, y, cz, w, 0.05, 2 * hz - 2 * ix);
     }
+    // (the saffron spire caps and every other piece stay clean: colour and brushed texture only)
   }
 
-  // ---- boxes (bottom at y0, default 0 = on the floor; y0 > 0 floats)
+  // ---- boxes (bottom at y0, default 0 = on the floor; y0 > 0 floats). UVs are rescaled so the brushed panel texture is PANEL_M metres per tile on every face.
   for (const b of map.boxes) {
     const { cy, height } = boxSpan(b);
-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(m(b.hw) * 2, m(height), m(b.hd) * 2), matFor(b.c));
+    const W = m(b.hw) * 2, D = m(b.hd) * 2, Hh = m(height);
+    const geo = new THREE.BoxGeometry(W, Hh, D);
+    scaleBoxUV(geo, W, Hh, D, PANEL_M);
+    const mesh = new THREE.Mesh(geo, matFor(b.c));
     mesh.position.set(m(b.x), m(cy), m(b.z));
     mesh.castShadow = true; mesh.receiveShadow = true;
     scene.add(mesh);
     accentBox(b);
   }
 
-  // ---- pillars (grab-able): round, base on the floor, cyan + amber beacon rings near the top
+  // ---- pillars (grab-able): round, base on the floor, plain painted slate with a teal + a white band near the top
   for (const p of map.pillars) {
-    const mesh = new THREE.Mesh(new THREE.CylinderGeometry(m(p.r), m(p.r), m(p.h), 28), matFor(p.c));
+    const mesh = new THREE.Mesh(new THREE.CylinderGeometry(m(p.r), m(p.r), m(p.h), 28), matFor(p.c, false));
     mesh.position.set(m(p.x), m(p.h) / 2, m(p.z));
     mesh.castShadow = true; mesh.receiveShadow = true;
     scene.add(mesh);
     const r = m(p.r) + 0.035, top = m(p.h);
-    strip('cyl', 'cyan', m(p.x), top - 0.5, m(p.z), r, 0.16, r);
-    strip('cyl', 'amber', m(p.x), top - 1.0, m(p.z), r, 0.10, r);
+    strip('cyl', 'teal', m(p.x), top - 0.5, m(p.z), r, 0.16, r);
+    strip('cyl', 'white', m(p.x), top - 1.0, m(p.z), r, 0.10, r);
   }
 
-  // ---- ramps: solid wedges. A ramp may carry its own palette colour (r.c); C.SPEED ramps get molten-gold strips along both slope edges.
+  // ---- ramps: solid wedges. A ramp may carry its own palette colour (r.c). C.SPEED ramps get white edge lines along both slope edges and gold chevrons that point downhill.
   const rampFallback = matFor(PALETTE.DECK);
   for (const r of map.ramps) {
-    const mesh = new THREE.Mesh(buildRampGeometry(r), r.c ? matFor(r.c) : rampFallback);
+    const geo = buildRampGeometry(r);
+    scaleUV(geo, 1 / PANEL_M);
+    const mesh = new THREE.Mesh(geo, r.c ? matFor(r.c) : rampFallback);
     mesh.castShadow = true; mesh.receiveShadow = true;
     scene.add(mesh);
     if (r.c === PALETTE.SPEED) {
       const s = rampSpan(r), run = m(s.len), rise = m(s.y1 - s.y0), slope = Math.hypot(run, rise), ang = Math.atan2(rise, run);
       const ax = Math.sin(s.rotY), az = Math.cos(s.rotY);                  // local +z (across the ramp) in world space
-      const q = new THREE.Quaternion().setFromEuler(gE.set(0, s.rotY, ang, 'YXZ'));   // tilt along the slope, then turn to the ascent direction
+      const dx = Math.cos(s.rotY), dz = -Math.sin(s.rotY);                 // local +x (up the slope), horizontal part, in world space
+      const qBase = new THREE.Quaternion().setFromEuler(gE.set(0, s.rotY, ang, 'YXZ'));   // tilt along the slope, then turn to the ascent direction
       const y = m((s.y0 + s.y1) / 2) + 0.012, off = m(s.wid) / 2 - 0.2;
-      for (const side of [-1, 1]) strip('box', 'gold', m(s.cx) + ax * off * side, y, m(s.cz) + az * off * side, slope - 0.2, 0.05, 0.16, q);
+      for (const side of [-1, 1]) strip('box', 'white', m(s.cx) + ax * off * side, y, m(s.cz) + az * off * side, slope - 0.2, 0.05, 0.16, qBase);
+      // chevrons: each is a V whose apex points DOWNHILL (toward the low edge): two bars angled `beta` off the slope axis, spaced 2.4 m apart along the slope
+      const beta = 0.7, L = Math.min(2.2, m(s.wid) * 0.26), n = Math.max(2, Math.floor((slope - 3) / 2.4) + 1), qArm = new THREE.Quaternion();
+      for (let i = 0; i < n; i++) {
+        const tt = (i - (n - 1) / 2) * 2.4;                                // apex position along the slope, from the ramp centre
+        for (const sg of [-1, 1]) {
+          const lx = tt + 0.5 * L * Math.cos(beta), lz = sg * 0.5 * L * Math.sin(beta);
+          const px = m(s.cx) + dx * lx * Math.cos(ang) + ax * lz, pz = m(s.cz) + dz * lx * Math.cos(ang) + az * lz, py = y + lx * Math.sin(ang) + 0.012;
+          qArm.setFromAxisAngle(Y_AXIS, -sg * beta);
+          strip('box', 'gold', px, py, pz, L, 0.05, 0.3, qBase.clone().multiply(qArm));
+        }
+      }
     }
   }
 
-  // ---- flush the accent strips: one InstancedMesh (= one draw call) per shape and colour
+  // ---- flush the accent bands: one InstancedMesh (= one draw call) per shape and colour. Plain matte paint: no emissive, no glow.
   const unitBox = new THREE.BoxGeometry(1, 1, 1), unitCyl = new THREE.CylinderGeometry(1, 1, 1, 28);
   for (const kind of ['box', 'cyl']) {
     for (const key of Object.keys(glow[kind])) {
       const list = glow[kind][key];
       if (!list.length) continue;
-      const hexColor = GLOW[key];
-      const mat = new THREE.MeshStandardMaterial({
-        color: new THREE.Color(hexColor).multiplyScalar(0.25), emissive: hexColor, emissiveIntensity: GLOW_INTENSITY, roughness: 0.5, metalness: 0
-      });
+      const mat = new THREE.MeshStandardMaterial({ color: PAINT[key], roughness: 0.5, metalness: 0.1 });
       const inst = new THREE.InstancedMesh(kind === 'box' ? unitBox : unitCyl, mat, list.length);
       list.forEach((mx, i) => inst.setMatrixAt(i, mx));
       inst.instanceMatrix.needsUpdate = true;
@@ -544,7 +604,7 @@ export function createScene() {
     itMarker.rotation.y = t * 2;
   }
 
-  // keep the sun (and its shadow box) around the player, so the whole 105 m roof gets shadows where you actually are
+  // keep the sun (and its shadow box) around the player, so the whole roof gets shadows where you actually are
   function setFocus(feet) {
     sun.position.set(feet.x + SUN.offset[0], feet.y + SUN.offset[1], feet.z + SUN.offset[2]);
     sun.target.position.set(feet.x, feet.y, feet.z);
@@ -559,7 +619,7 @@ export function createScene() {
 
   // ---- grapple tether: one thin glowing cylinder + a hook ball per player, created on first use
   const ropeGeo = new THREE.CylinderGeometry(0.035, 0.035, 1, 8), hookGeo = new THREE.SphereGeometry(0.13, 10, 8);
-  const ropeMat = new THREE.MeshBasicMaterial({ color: 0x7fe9ff, toneMapped: false });
+  const ropeMat = new THREE.MeshBasicMaterial({ color: 0x0e7490, toneMapped: false });   // deep teal: readable against the bright sky and the light floor
   const ropes = [], UP = new THREE.Vector3(0, 1, 0), rdir = new THREE.Vector3();
   // from / to = {x, y, z} in metres (torso, anchor); pass null to hide this player's rope.
   function setGrapple(idx, from, to) {
