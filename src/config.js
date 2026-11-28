@@ -51,8 +51,8 @@ export const JUMP = {
 export const BHOP = {
   window: 0.22,        // s after landing: speed is preserved; jumping inside it chains a b-hop (forgiving: casual Shift + Space slide-hops hold)
   minAir: 0.05,        // s: time in the air before touching down counts as a landing (filters one-tick grounded flicker)
-  bonus: 25,           // units / s added along the movement direction by a b-hop (timing reward)
-  maxSpeed: 850,       // units / s: the b-hop bonus never pushes you past this (a higher speed is kept as is)
+  bonus: 15,           // units / s added along the movement direction by a b-hop (timing reward)
+  maxSpeed: 520,       // units / s: the b-hop bonus never pushes you past this (a higher speed, e.g. from wall-kicks / ramps / grapples, is kept as is)
 };
 
 // ---- wall-run + wall-kick (old units). Engages in the air while holding W, fast enough, with a wall beside you.
@@ -62,13 +62,13 @@ export const WALLRUN = {
   minSpeed: 220,       // units / s horizontal: slower than this and you do not catch the wall
   minAir: 0.05,        // s in the air before a wall can be caught (filters one-tick grounded flicker, same idea as BHOP.minAir)
   minTangent: 0.3,     // share of your speed that must run ALONG the wall (0.3 ~ within 72 degrees of parallel); head-on hits do not stick
-  holdSpeed: 360,      // units / s: wall-running never goes slower than this (a faster speed is kept)
+  holdSpeed: 440,      // units / s: wall-running never goes slower than this (a faster speed is kept)
   stick: 60,           // units / s pressed into the wall while running, so the body stays on the surface
   wallGrav: 240,       // units / s^2 gravity while wall-running (normal fall is JUMP.gravFall)
   maxFall: 150,        // units / s: downward speed is clamped to this while wall-running
   kickUp: 360,         // upward speed of the wall-kick
   kickOut: 115,        // speed pushed away from the wall along its normal (small: a clean pop that can curve back onto the next inline panel)
-  kickFwd: 85,         // extra speed along the run direction
+  kickFwd: 110,        // extra speed along the run direction
   regrabCd: 0.25,      // s during which the wall you just kicked off cannot be caught again
   entryUp: 90,         // units / s: upward pop when a wall is caught while FALLING (vy < 0), so runs carry along the whole wall instead of dipping off early
   stickReach: 12,      // units: extra wall-ray reach while ALREADY wall-running (hysteresis): skimming a corner or curving round a pillar keeps the lock
@@ -82,9 +82,9 @@ export const WALLRUN = {
 
 // ---- dash burst (F): horizontal launch along the held direction (or facing). Keeps runT and any higher speed.
 export const DASH = {
-  speed: 540,          // units / s during the dash (never lowers a faster speed)
+  speed: 450,          // units / s during the dash (never lowers a faster speed)
   duration: 0.2,       // s the direction is locked
-  cooldown: 1.3,       // s between dashes
+  cooldown: 1.4,       // s between dashes
   airGrav: 250,        // units / s^2 while dashing (floaty, so a dash carries across gaps)
   dodgeIframes: 0.16,  // s of Phase-Dodge invulnerability from the moment F triggers a dash (state.dodgeT): a server 'hit' that arrives in this window is ignored locally
 };
@@ -111,10 +111,10 @@ export const GRAPPLE = {
 // ---- crouch-slide (old units). Titanfall 2 flow: low friction, hard steering, a flat boost on entry, downhill acceleration.
 export const SLIDE = {
   height: 40,          // capsule height while sliding (40 units = 1.0 m; standing is PUPPET.height = 72 = 1.8 m)
-  friction: 0.72,      // speed multiplier per SECOND while sliding (applied as friction^dt each tick): a snappy glide burst on flat ground that then settles into a crouch (slide-hops inside BHOP.window skip it and keep full speed)
+  friction: 0.52,      // speed multiplier per SECOND while sliding (applied as friction^dt each tick): a crisp ~1.6 s glide burst on flat ground that then settles into a crouch (slide-hops inside BHOP.window skip it and keep full speed)
   steerAccel: 240,     // units / s^2 of sideways steering toward the held keys (carves the slide, adds no speed)
-  boostAdd: 115,       // units / s ADDED to the horizontal speed on slide entry (along the velocity, or the facing when slow)
-  maxBoostSpeed: 680,  // the boost never pushes you above this; a faster entry (b-hop / dash / ramp speed) is kept as is, never reduced
+  boostAdd: 65,        // units / s ADDED to the horizontal speed on slide entry (along the velocity, or the facing when slow)
+  maxBoostSpeed: 490,  // the boost never pushes you above this; a faster entry (b-hop / dash / ramp speed) is kept as is, never reduced
   boostCd: 0.75,       // s after a boost before the next slide entry can boost again (no boost spam from a standstill)
   slopeAccel: 650,     // units / s^2 added along the slide direction while sliding DOWNHILL (grounded on a real slope, normal.y < 0.985, with the velocity pointing down it)
   minSpeed: 60,        // units / s: below this the facing direction is used for the boost, and steering may still creep up to this speed
