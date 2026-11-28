@@ -10,7 +10,7 @@
 // Speeds in `state` are in METRES / s (already scaled); config numbers are in old units and go through m().
 
 // MAX_FLOW_SPEED (below) is the soft aerodynamic ceiling on horizontal speed.
-import { STEP, SCALE, m, PUPPET, RUN, MOVE, JUMP, BHOP, DASH, SLIDE, WALLRUN, GRAPPLE, MANTLE, MELEE } from '../config.js';
+import { STEP, SCALE, m, PUPPET, RUN, MOVE, JUMP, BHOP, DASH, SLIDE, WALLRUN, GRAPPLE, MANTLE, MELEE, PARRY } from '../config.js';
 import { movePlayer, hasHeadroom, detectWall, groundGap, raycastGrapple, feetPos, checkLedgeMantle } from './world.js';
 
 // Soft aerodynamic speed ceiling, old units / s (Titanfall 2 "flow" zone). Horizontal speed above it bleeds back toward it
@@ -18,13 +18,15 @@ import { movePlayer, hasHeadroom, detectWall, groundGap, raycastGrapple, feetPos
 const MAX_FLOW_SPEED = 760;
 
 // Input snapshot with nothing pressed (used while a player is locked).
-export const IDLE_INPUT = Object.freeze({ ax: 0, az: 0, moving: false, fwd: false, jump: false, dash: false, slide: false, grapple: false, attack: false });
+export const IDLE_INPUT = Object.freeze({ ax: 0, az: 0, moving: false, fwd: false, jump: false, dash: false, slide: false, grapple: false, attack: false, parry: false });
 
 export function createPlayerState() {
   return { vx: 0, vz: 0, vy: 0, facing: 0, runT: 0, isIt: false, locked: false, wallHit: false, jumpBuf: 0, coyote: 0,
            sliding: false, slideBoostCd: 0, height: m(PUPPET.height),
            wasGrounded: true, airT: 0, bhopTimer: 0, bhopChain: 0,
            dashT: 0, dashCd: 0, dashX: 0, dashZ: 1, dashSpeed: 0,
+           dashElapsed: 0,     // s since the current dash started (the server treats the first DASH.dodgeIframes s as Phase-Dodge i-frames)
+           parryT: 0, parryElapsed: 0, parryCd: 0,   // Slice M2 guard: s of guard left (PARRY.duration), s since it started (perfect while <= PARRY.perfectWindow), cooldown
            dodgeT: 0,          // s of Phase-Dodge i-frames left (set to DASH.dodgeIframes when F dashes, ticks down by STEP; main.js ignores server hits while > 0)
            airJumpsLeft: JUMP.maxAirJumps, climbing: false,
            wallRunning: false, wallSide: 0, wallN: { x: 0, z: 0 }, wallT: { x: 0, z: 0 },
@@ -36,7 +38,7 @@ export function createPlayerState() {
            lungeT: 0, lungeX: 0, lungeZ: 1, lungeV: 0, lungePre: 0, // magnetic lunge: s left, direction, lunge speed (m / s), the momentum to hand back afterwards (m / s)
            stunT: 0,           // s left of hit-stun (set by applyKnockback): input ignored, knockback plays out
            slashEvt: null,     // { dirX, dirZ, speed } set on the tick a slash starts; main.js sends it to the server and clears it (speed = pre-lunge horizontal speed, old units / s)
-           sfx: [] };          // sound events of THIS tick ('jump' | 'airjump' | 'kick' | 'attach' | 'dash' | 'grapple' | 'slash'); cleared at the start of stepPlayer, read by main.js
+           sfx: [] };          // sound events of THIS tick ('jump' | 'airjump' | 'kick' | 'attach' | 'dash' | 'grapple' | 'slash' | 'parry'); cleared at the start of stepPlayer, read by main.js
 }
 
 // Torso point (metres) where the grapple rope leaves the body and the pull is measured from.
@@ -131,7 +133,9 @@ export function stepPlayer(s, inp, ctx) {
 
   // ---- timers
   if (s.dashCd > 0) s.dashCd = Math.max(0, s.dashCd - STEP);
-  if (s.dashT > 0) s.dashT = Math.max(0, s.dashT - STEP);
+  if (s.dashT > 0) { s.dashElapsed += STEP; s.dashT = Math.max(0, s.dashT - STEP); }
+  if (s.parryCd > 0) s.parryCd = Math.max(0, s.parryCd - STEP);
+  if (s.parryT > 0) { s.parryElapsed += STEP; s.parryT = Math.max(0, s.parryT - STEP); }
   if (s.dodgeT > 0) s.dodgeT = Math.max(0, s.dodgeT - STEP);
   if (s.slideBoostCd > 0) s.slideBoostCd = Math.max(0, s.slideBoostCd - STEP);
   if (s.attackCd > 0) s.attackCd = Math.max(0, s.attackCd - STEP);
@@ -139,6 +143,11 @@ export function stepPlayer(s, inp, ctx) {
   if (s.regrabTimer > 0) s.regrabTimer = Math.max(0, s.regrabTimer - STEP);
   if (s.wallDropCd > 0) s.wallDropCd = Math.max(0, s.wallDropCd - STEP);
   if (grounded) s.airJumpsLeft = JUMP.maxAirJumps;
+
+  // ---- parry / block (Right-Click edge): raises the guard for PARRY.duration. Not while swinging, locked or stunned (inp is idle then).
+  if (inp.parry && s.parryCd <= 0 && s.parryT <= 0 && s.attackT <= 0 && !s.locked) {
+    s.parryT = PARRY.duration; s.parryElapsed = 0; s.parryCd = PARRY.cooldown; s.sfx.push('parry');
+  }
 
   // ---- grapple / sticky hand: a press (edge) fires a shot along the aim ray (inp.aim, set by main.js for the human); while hooked
   // the velocity is pulled toward the anchor and only the speed TOWARD it is capped, so sideways speed survives and the
@@ -248,7 +257,7 @@ export function stepPlayer(s, inp, ctx) {
     if (!inp.moving) { dx = Math.sin(s.facing); dz = Math.cos(s.facing); }
     s.dashX = dx; s.dashZ = dz;
     s.dashSpeed = Math.max(m(DASH.speed), Math.hypot(s.vx, s.vz));
-    s.dashT = DASH.duration; s.dashCd = DASH.cooldown;
+    s.dashT = DASH.duration; s.dashCd = DASH.cooldown; s.dashElapsed = 0;
     s.dodgeT = DASH.dodgeIframes;                             // Phase-Dodge: invulnerable for the first dodgeIframes seconds of the dash (independent of dashT, so a jump-cancel keeps it)
     s.sliding = false; s.sfx.push('dash');
   }
@@ -282,6 +291,7 @@ export function stepPlayer(s, inp, ctx) {
       }
     }
 
+    s.parryT = 0;                                             // swinging drops the guard
     s.attackT = MELEE.attackTime; s.attackCd = MELEE.cooldown; s.attackYaw = Math.atan2(dirX, dirZ);
     s.sfx.push('slash');
     s.slashEvt = { dirX, dirZ, speed: Math.min(pre / SCALE, 2000) };

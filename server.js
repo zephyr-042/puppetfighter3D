@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { Server } from 'socket.io';
 import DISTRICT_MAP from './src/game/maps.js';
-import { SCALE, MELEE } from './src/config.js';
+import { SCALE, MELEE, PARRY, DASH } from './src/config.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3000;
@@ -27,6 +27,7 @@ const MAX_HP = MELEE.maxHp;
 const SLASH_SLACK_MS = 80;                                        // network jitter allowance on the slash cooldown
 const SPEED_SLACK = 1.25, SPEED_SLACK_ADD = 60;                   // a claimed slash speed may exceed the speed the server last saw by 25 % + 60 units / s (state packets are 30 Hz)
 const REACH_M = MELEE.reach * SCALE, PAD_M = MELEE.radiusPad * SCALE, VERT_M = MELEE.vertical * SCALE;
+const FLAG_SLACK_MS = 120;                                        // jitter allowance on the client-reported parry / dodge windows (state packets are 30 Hz)
 const STAND_HEIGHT = 1.8;                                         // metres (72 old units)
 const CORS_ORIGINS = process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',').map((s) => s.trim()) : null;   // dev only (vite on another port)
 
@@ -70,6 +71,7 @@ function dyn(p) {
     x: r3(p.x), y: r3(p.y), z: r3(p.z), vx: r3(p.vx), vy: r3(p.vy), vz: r3(p.vz), yaw: r3(p.yaw), height: r3(p.height),
     sliding: p.sliding, dashing: p.dashing, wallRunning: p.wallRunning, grappleActive: p.grappleActive,
     grappleAnchor: p.grappleAnchor, ragdoll: p.ragdoll, ko: p.ko, ping: p.ping,
+    parrying: p.parrying, perfectParry: p.perfectParry, dodging: p.dodging,
     hp: Math.round(p.hp * 10) / 10, maxHp: p.maxHp, dead: p.dead,
   };
 }
@@ -91,6 +93,7 @@ function pickSpawn(excludeId) {
 function placeAt(p, s) {
   p.x = s.x; p.y = s.y; p.z = s.z; p.vx = p.vy = p.vz = 0;
   p.ragdoll = false; p.grappleActive = false; p.grappleAnchor = null; p.sliding = p.dashing = p.wallRunning = false;
+  p.parrying = p.perfectParry = p.dodging = false;
 }
 
 // ---- melee (server-authoritative) ----------------------------------------------------------------------------------------------------
@@ -165,6 +168,7 @@ io.on('connection', (socket) => {
     sliding: false, dashing: false, wallRunning: false, grappleActive: false, grappleAnchor: null, ragdoll: false,
     ko: 0, ping: 0, lastState: 0, respawnPending: false,
     hp: MAX_HP, maxHp: MAX_HP, dead: false, lastHitBy: null, lastHitAt: 0, lastDamageAt: 0, lastSlash: 0,
+    parrying: false, perfectParry: false, dodging: false, parryStart: 0, dodgeStart: 0, stunUntil: 0,   // Slice M2: guard / Phase-Dodge flags (validated in 'state'), rising-edge times, attacker stagger
   };
   players.set(id, p);
 
@@ -204,6 +208,14 @@ io.on('connection', (socket) => {
     const a = d.grappleAnchor;
     p.grappleAnchor = p.grappleActive && a && typeof a === 'object' ? { x: num(a.x, 0, 1000), y: num(a.y, 0, 1000), z: num(a.z, 0, 1000) } : null;
     p.ragdoll = !!d.ragdoll || p.respawnPending;                  // a KO'd / respawning pod stays down whatever the packet says
+    // guard / Phase-Dodge flags: reported by the client, but a RISING edge is only accepted once the matching cooldown has run (no flag spam) and the perfect / i-frame
+    // windows are re-measured from that edge on the server clock, so a stuck flag cannot keep a player invulnerable.
+    let parrying = !!d.parrying, dodging = !!d.dodging;
+    if (parrying && !p.parrying) { if (now - p.parryStart < PARRY.cooldown * 1000 - FLAG_SLACK_MS) parrying = false; else p.parryStart = now; }
+    if (dodging && !p.dodging) { if (now - p.dodgeStart < DASH.cooldown * 1000 - FLAG_SLACK_MS) dodging = false; else p.dodgeStart = now; }
+    p.parrying = parrying && !p.ragdoll && now - p.parryStart <= PARRY.duration * 1000 + FLAG_SLACK_MS;
+    p.perfectParry = p.parrying && !!d.perfectParry && now - p.parryStart <= PARRY.perfectWindow * 1000 + FLAG_SLACK_MS;
+    p.dodging = dodging && !p.ragdoll && now - p.dodgeStart <= DASH.dodgeIframes * 1000 + FLAG_SLACK_MS;
   });
 
   // Kinetic Slash request: { dir: { x, z }, speed } (dir = horizontal aim, speed = horizontal speed in old units / s when the swing started).
@@ -211,6 +223,7 @@ io.on('connection', (socket) => {
   socket.on('slash', (d) => {
     if (!p.joined || p.dead || p.ragdoll || p.respawnPending || !d || typeof d !== 'object') return;   // KO'd / tumbling / falling pods cannot swing
     const now = Date.now();
+    if (now < p.stunUntil) return;                                                  // staggered by a perfect parry
     if (now - p.lastSlash < MELEE.cooldown * 1000 - SLASH_SLACK_MS) return;          // cooldown gate (client enforces the exact 0.55 s)
     p.lastSlash = now;
     const res = resolveSlash(p, d, joinedPlayers());
@@ -218,10 +231,30 @@ io.on('connection', (socket) => {
     socket.to('game').emit('slashFx', { id, yaw: r3(Math.atan2(res.dx, res.dz)) });
     for (const h of res.hits) {
       const q = h.target;
-      q.hp = Math.max(0, q.hp - h.damage);
+      const tx = p.x - q.x, tz = p.z - q.z, tl = Math.hypot(tx, tz) || 1;           // from the defender toward the attacker
+      const point = { x: r3(q.x + tx / tl * 0.6), y: r3(q.y + q.height * 0.6), z: r3(q.z + tz / tl * 0.6) };   // where the blades meet
+      if (q.dodging) {                                                          // Phase-Dodge i-frames: the slash passes through, no damage, no knockback
+        io.to('game').emit('dodged', { attackerId: id, targetId: q.id });
+        continue;
+      }
+      if (q.perfectParry) {                                                     // perfect parry: defender untouched, attacker staggered + shoved back
+        const k = PARRY.attackerKnock;
+        const attackerKnock = { x: r3(tx / tl * k), y: r3(k * MELEE.knockUp), z: r3(tz / tl * k) };
+        p.stunUntil = now + PARRY.attackerStun * 1000;
+        io.to('game').emit('parried', { defenderId: q.id, attackerId: id, perfect: true, point, attackerKnock, attackerStun: PARRY.attackerStun });
+        continue;
+      }
+      let damage = h.damage, knockVec = h.knockVec;
+      const blocked = !!q.parrying;                                             // regular block: reduced damage + knockback
+      if (blocked) {
+        damage = Math.round(damage * PARRY.blockDmgMult);
+        knockVec = { x: r3(knockVec.x * PARRY.blockKnockMult), y: r3(knockVec.y * PARRY.blockKnockMult), z: r3(knockVec.z * PARRY.blockKnockMult) };
+      }
+      q.hp = Math.max(0, q.hp - damage);
       q.lastHitBy = id; q.lastHitAt = now; q.lastDamageAt = now;
       const kill = q.hp <= 0;
-      io.to('game').emit('hit', { attackerId: id, targetId: q.id, damage: h.damage, knockVec: h.knockVec, kill, hp: q.hp });
+      io.to('game').emit('hit', { attackerId: id, targetId: q.id, damage, knockVec, kill, hp: q.hp, blocked });
+      if (blocked) io.to('game').emit('parried', { defenderId: q.id, attackerId: id, perfect: false, point });
       if (kill) {
         q.dead = true;
         creditKo(q, 'slash');

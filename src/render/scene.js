@@ -105,6 +105,9 @@ const ARC_HALF = THREE.MathUtils.degToRad(70);                           // 2 x 
 // slash timeline over attackP in 0..1 (attackP = 1 - attackT / MELEE.attackTime): wind-up, sweep, recovery
 const SLASH = { p0: 0.12, p1: 0.62, trailSegs: 28, trailOut: ORBIT_R + BLADE.len, trailMax: 1.1, trailMin: 0.1, trailTail: 0.7, trailFade: 0.25 };
 
+// guard stance (Slice M2): the blade hovers across the FRONT of the pod, pointing along pod-local +X; the energy barrier is a curved shield panel in front
+const GUARD = { x: -0.7, y: 1.05, z: 0.62, yaw: Math.PI / 2, arc: Math.PI * 0.85, r: 0.95, h: 1.55, blue: new THREE.Color(0x4d8dff), cyan: new THREE.Color(0x00f5d4), ease: 18, colEase: 28 };
+
 const _yawQ = new THREE.Quaternion(), _tiltQ = new THREE.Quaternion(), _axis = new THREE.Vector3(), _up = new THREE.Vector3();
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
 const sstep = (a, b, x) => { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
@@ -163,6 +166,7 @@ function makeTrail(color) {
 //   setFeet(x, y, z), setHeight(h) (slide squash), setYaw(a)         - normal play (pod stands on its feet, `pod` follows)
 //   setSpeed(units / s)  horizontal speed -> blade charge glow + streak;   setLean(x, z)  target lean (world-space, |l| <= JUICE.tiltMax rad, the pod leans toward +l, pivoting about its FEET, eased)
 //   setMode('pod' | 'ragdoll' | 'hidden')                              - 'ragdoll': ragdoll.js drives `pod` (syncRagdollMeshes(rag, puppet.pod, out)); setFeet / setYaw are then not called
+//   setGuard(0 | 1 | 2)  parry guard: 0 = down, 1 = regular block (soft blue barrier), 2 = PERFECT parry window (bright cyan); the blade snaps horizontally in front of the pod
 //   setAttack(p)  p in 0..1 = swing progress (1 - attackT / MELEE.attackTime), -1 = no swing;   flash(power)  hit flash;   update(dt)  called by view.update(dt)
 function createPuppet(scene, color) {
   const { capsuleGeo, ringGeo, bladeGeo } = getGeos();
@@ -195,6 +199,13 @@ function createPuppet(scene, color) {
   bladeRig.add(streak);
   mount.add(bladeRig);
 
+  // guard barrier: a translucent curved panel in front of the pod (open cylinder segment, centred on +Z), additive glow, only visible while the guard is up
+  const guardMat = new THREE.MeshBasicMaterial({ color: GUARD.blue.clone(), transparent: true, opacity: 0, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false, fog: false });
+  const guardGeo = new THREE.CylinderGeometry(GUARD.r, GUARD.r, GUARD.h, 24, 1, true, -GUARD.arc / 2, GUARD.arc);
+  const guardMesh = new THREE.Mesh(guardGeo, guardMat);
+  guardMesh.visible = false; guardMesh.frustumCulled = false; guardMesh.renderOrder = 3;
+  mount.add(guardMesh);
+
   const tc = base.clone().lerp(WHITE, 0.4);
   const trailGeo = makeTrail(tc), trailCol = trailGeo.getAttribute('color'), trail = new THREE.Mesh(trailGeo, trailMat);
   trail.visible = false; trail.frustumCulled = false; trail.renderOrder = 2;
@@ -203,6 +214,7 @@ function createPuppet(scene, color) {
 
   let fx = 0, fy = 0, fz = 0, curH = total, yaw = 0, mode = 'pod', attackP = -1, flashT = 0, flashPow = 1, t = Math.random() * 10;
   let leanX = 0, leanZ = 0, leanTX = 0, leanTZ = 0, spdT = 0, spdS = 0;     // lean (current / target) and horizontal speed in units / s (target / smoothed)
+  let guardState = 0, guardA = 0, guardC = 0;                                // guard: requested state (0 / 1 / 2), eased 0..1 amount, eased 0..1 'perfect' colour mix
   const phase = Math.random() * 6.28;
   // pod pose = lean * yaw, pivoting about the FEET: the centre sits curH / 2 up the leaned axis, so the soles stay planted while the top leans into the run
   function applyPose() {
@@ -280,9 +292,28 @@ function createPuppet(scene, color) {
       stretch = 1 + (0.18 + 0.12 * fast) * on;                            // a charged blade stretches a little more
       fade = 1 - sstep(SLASH.p1, SLASH.p1 + SLASH.trailFade, p);
     }
-    bladeRig.position.set(-Math.sin(th) * ORBIT_R, py * k, Math.cos(th) * ORBIT_R);
+    let bx = -Math.sin(th) * ORBIT_R, bz = Math.cos(th) * ORBIT_R;
+    // guard stance: the blade glides to a horizontal position across the front (not while a swing is running: the slash drops the guard anyway)
+    const gk = 1 - Math.exp(-GUARD.ease * dt), gc = 1 - Math.exp(-GUARD.colEase * dt);
+    guardA += ((guardState > 0 ? 1 : 0) - guardA) * gk;
+    guardC += ((guardState === 2 ? 1 : 0) - guardC) * gc;
+    const gw = guardA * (p >= 0 && p < 1 ? 0 : 1);
+    if (gw > 0.001) {
+      bx += (GUARD.x - bx) * gw; bz += (GUARD.z - bz) * gw;
+      py += (GUARD.y - py) * gw; yawB += (GUARD.yaw - yawB) * gw; pitchB *= (1 - gw);
+    }
+    bladeRig.position.set(bx, py * k, bz);
     bladeRig.rotation.set(pitchB, yawB, 0, 'YXZ');
     bladeRig.scale.set(1, k, stretch);
+
+    // guard barrier: fades in with the guard, bright cyan during the perfect window, a soft pulsing blue after it
+    if (guardA > 0.02) {
+      guardMesh.visible = true;
+      guardMat.color.copy(GUARD.blue).lerp(GUARD.cyan, guardC);
+      const pulse = 0.5 + 0.5 * Math.sin(t * 22);
+      guardMat.opacity = guardA * (0.2 + 0.1 * pulse + guardC * (0.3 + 0.1 * pulse));
+      guardMesh.position.y = GUARD.y * k - 0.1 * k; guardMesh.scale.set(1, k, 1);
+    } else guardMesh.visible = false;
 
     // crescent trail: drawn behind the blade (u = how far the blade has swept), fading with distance and after the sweep ends
     if (u >= 0 && fade > 0.001) {
@@ -312,6 +343,7 @@ function createPuppet(scene, color) {
     },
     setMode,
     setAttack(v) { attackP = v; },
+    setGuard(v) { guardState = v | 0; },
     flash(power = 1) { flashT = FLASH_TIME; flashPow = power; },
     update
   };

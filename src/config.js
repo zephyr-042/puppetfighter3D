@@ -165,6 +165,21 @@ export const MELEE = {
   vertical: 88,        // old units (2.2 m): max vertical distance between the two capsule centres for a slash to connect
 };
 
+// ---- parry / block (Slice M2, Right-Click). Holding the guard for `duration` s: the first `perfectWindow` s is a PERFECT parry (a slash into it does nothing to the
+// defender and staggers + shoves the attacker), the rest is a regular block (damage x blockDmgMult, knockback x blockKnockMult). The SERVER judges it (server.js imports this block).
+export const PARRY = {
+  duration: 0.55,      // s total guard window
+  perfectWindow: 0.22, // s at the start of the guard that count as a perfect parry
+  cooldown: 1.15,      // s from the press until the next parry can start
+  blockDmgMult: 0.3,   // regular block: 70 % damage reduction
+  blockKnockMult: 0.5, // regular block: half the knockback
+  attackerStun: 0.65,  // s the attacker of a PERFECT parry is staggered (no steering / actions)
+  attackerKnock: 6.0,  // m / s: backward shove on the attacker of a perfect parry (horizontal; the vertical part is MELEE.knockUp of it)
+  hitStop: 0.06,       // s camera + blade freeze when a perfect parry happens to you (client juice)
+  shakePerfect: 0.09,  // m: camera shake impulse of a perfect parry (client juice)
+  flareTime: 0.35,     // s the crosshair flares after "PARRIED!" (client juice)
+};
+
 // ---- juice (Slice M1): speed-charged blade, pod lean, hit-stop and camera shake. Purely visual / feel: nothing here touches movement or the server.
 export const JUICE = {
   chargeFrom: 300,     // units / s: horizontal speed where the blade starts to charge (= MELEE.dmgSpeedMin)
