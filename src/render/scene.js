@@ -2,7 +2,8 @@
 // RENDER (1/2): the Three.js renderer, lights, the District map (floor slabs with rim trims, boxes, pillars, ramp wedges),
 // and one puppet per player: a SINGLE armoured pod (satin-dark capsule, emissive chest + visor rings, squashes while sliding) with a floating
 // energy blade hovering off its right side that sweeps a 140 degree slash with a glowing crescent trail while `attackP` runs (setAttack). The pod is
-// also the ragdoll: when the pod tumbles, physics/ragdoll.js drives this very same `pod` group (one rigid capsule, no limbs), so nothing ever shape-shifts.
+// speed-charged (blade glow 0.6 -> 2.4 and a longer glow streak as horizontal speed climbs 300 -> 760 units / s, i.e. toward the full 75 damage slash) and leans up to 0.22 rad into its
+// movement / dodge direction. The pod is also the ragdoll: when the pod tumbles, physics/ragdoll.js drives this very same `pod` group (one rigid capsule, no limbs), so nothing ever shape-shifts.
 // Also the red "IT" cone marker and the glowing grapple tether (setGrapple).
 // LOOK: sleek cinematic cyber-dusk (Mirror's Edge Catalyst / Ghostrunner / Titanfall 2). A low amber sun, a midnight-to-sunset sky gradient, dark
 // architectural materials and "runner vision" emissive accents (cyan wall-run strips, amber billboard faces, gold pad / speed-ramp edges, beacon rings
@@ -12,7 +13,7 @@
 // Loads after: config.js, game/maps.js
 
 import * as THREE from 'three';
-import { m, PUPPET, CAM, MAP } from '../config.js';
+import { m, PUPPET, CAM, MAP, JUICE } from '../config.js';
 import DISTRICT_MAP, { PALETTE, floorSlabs, rampSpan, boxSpan } from '../game/maps.js';
 
 // ---- look tuning (everything the dusk mood depends on lives here) -------------------------------------------------------------
@@ -104,6 +105,8 @@ const ARC_HALF = THREE.MathUtils.degToRad(70);                           // 2 x 
 // slash timeline over attackP in 0..1 (attackP = 1 - attackT / MELEE.attackTime): wind-up, sweep, recovery
 const SLASH = { p0: 0.12, p1: 0.62, trailSegs: 28, trailOut: ORBIT_R + BLADE.len, trailMax: 1.1, trailMin: 0.1, trailTail: 0.7, trailFade: 0.25 };
 
+const _yawQ = new THREE.Quaternion(), _tiltQ = new THREE.Quaternion(), _axis = new THREE.Vector3(), _up = new THREE.Vector3();
+const clamp01 = (v) => Math.max(0, Math.min(1, v));
 const sstep = (a, b, x) => { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
 
 let capsuleGeo = null, ringGeo = null, bladeGeo = null;
@@ -130,7 +133,8 @@ function getGeos() {
       blade: extrudeBlade(bladeShape(1, 1), BLADE.thick),
       edge: extrudeBlade(bladeShape(0.96, 0.3), BLADE.thick * 1.7),      // white-hot core line, a touch thicker so it shows through both faces
       hilt: new THREE.CylinderGeometry(0.05, 0.065, 0.26, 12).rotateX(Math.PI / 2).translate(0, 0, -BLADE.back + 0.02),
-      guard: new THREE.TorusGeometry(0.1, 0.018, 8, 22).translate(0, 0, 0.03)
+      guard: new THREE.TorusGeometry(0.1, 0.018, 8, 22).translate(0, 0, 0.03),
+      streak: new THREE.ConeGeometry(0.05, 1, 10, 1, true).rotateX(-Math.PI / 2)   // unit-long comet tail: base at +Z (the hilt), tip trailing toward -Z
     };
   }
   return { capsuleGeo, ringGeo, bladeGeo };
@@ -157,6 +161,7 @@ function makeTrail(color) {
 
 // One puppet = one pod. API (all metres / radians):
 //   setFeet(x, y, z), setHeight(h) (slide squash), setYaw(a)         - normal play (pod stands on its feet, `pod` follows)
+//   setSpeed(units / s)  horizontal speed -> blade charge glow + streak;   setLean(x, z)  target lean (world-space, |l| <= JUICE.tiltMax rad, the pod leans toward +l, pivoting about its FEET, eased)
 //   setMode('pod' | 'ragdoll' | 'hidden')                              - 'ragdoll': ragdoll.js drives `pod` (syncRagdollMeshes(rag, puppet.pod, out)); setFeet / setYaw are then not called
 //   setAttack(p)  p in 0..1 = swing progress (1 - attackT / MELEE.attackTime), -1 = no swing;   flash(power)  hit flash;   update(dt)  called by view.update(dt)
 function createPuppet(scene, color) {
@@ -166,7 +171,8 @@ function createPuppet(scene, color) {
   const armor = new THREE.MeshStandardMaterial({ color: base.clone().lerp(DARK_STEEL, ARMOR_DARKEN), roughness: 0.35, metalness: 0.25 });
   const core = new THREE.MeshStandardMaterial({ color: base, emissive: base, emissiveIntensity: CORE_EMISSIVE, roughness: 0.3, metalness: 0.1 });
   const bladeMat = new THREE.MeshStandardMaterial({ color: base.clone().multiplyScalar(0.3), emissive: base, emissiveIntensity: BLADE_EMISSIVE, roughness: 0.3, metalness: 0.1 });
-  const edgeMat = new THREE.MeshBasicMaterial({ color: base.clone().lerp(WHITE, 0.8), toneMapped: false });
+  const edgeCol = base.clone().lerp(WHITE, 0.8), edgeMat = new THREE.MeshBasicMaterial({ color: edgeCol.clone(), toneMapped: false });
+  const streakMat = new THREE.MeshBasicMaterial({ color: base.clone().lerp(WHITE, 0.35), transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false, fog: false });
   const trailMat = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, toneMapped: false, fog: false });
 
   const pod = new THREE.Group(), mount = new THREE.Group();
@@ -184,6 +190,9 @@ function createPuppet(scene, color) {
   bladeRig.add(new THREE.Mesh(bladeGeo.guard, core));
   bladeRig.add(new THREE.Mesh(bladeGeo.blade, bladeMat));
   bladeRig.add(new THREE.Mesh(bladeGeo.edge, edgeMat));
+  const streak = new THREE.Mesh(bladeGeo.streak, streakMat);              // speed glow trail: streams back from the hilt when the blade is charged (JUICE.streakFrom)
+  streak.visible = false; streak.frustumCulled = false;
+  bladeRig.add(streak);
   mount.add(bladeRig);
 
   const tc = base.clone().lerp(WHITE, 0.4);
@@ -193,8 +202,21 @@ function createPuppet(scene, color) {
   scene.add(pod);
 
   let fx = 0, fy = 0, fz = 0, curH = total, yaw = 0, mode = 'pod', attackP = -1, flashT = 0, flashPow = 1, t = Math.random() * 10;
+  let leanX = 0, leanZ = 0, leanTX = 0, leanTZ = 0, spdT = 0, spdS = 0;     // lean (current / target) and horizontal speed in units / s (target / smoothed)
   const phase = Math.random() * 6.28;
-  const place = () => pod.position.set(fx, fy + curH / 2, fz);
+  // pod pose = lean * yaw, pivoting about the FEET: the centre sits curH / 2 up the leaned axis, so the soles stay planted while the top leans into the run
+  function applyPose() {
+    _yawQ.setFromAxisAngle(Y_AXIS, yaw);
+    const a = Math.hypot(leanX, leanZ);
+    if (a > 1e-4) {
+      _axis.set(leanZ / a, 0, -leanX / a);                                 // up x lean-direction: a positive angle about it tips the top toward +lean
+      _tiltQ.setFromAxisAngle(_axis, a);
+      pod.quaternion.multiplyQuaternions(_tiltQ, _yawQ);
+      _up.set(0, curH / 2, 0).applyQuaternion(_tiltQ);
+    } else { pod.quaternion.copy(_yawQ); _up.set(0, curH / 2, 0); }
+    pod.position.set(fx + _up.x, fy + _up.y, fz + _up.z);
+  }
+  const place = applyPose;
 
   // rings sit on the straight part of the capsule (chest low, visor high) and follow the squash, so a slide pulls them down with the body
   function setHeight(h) {
@@ -213,7 +235,7 @@ function createPuppet(scene, color) {
     mode = v;
     pod.visible = v !== 'hidden';
     if (v === 'ragdoll') setHeight(total);                               // the physics body is the full standing capsule
-    else if (v === 'pod') { place(); pod.quaternion.setFromAxisAngle(Y_AXIS, yaw); }
+    else if (v === 'pod') applyPose();
   }
 
   function update(dt) {
@@ -223,8 +245,26 @@ function createPuppet(scene, color) {
     if (flashT > 0) {
       flashT = Math.max(0, flashT - dt);
       const f = (flashT / FLASH_TIME) * flashPow;
-      armor.emissive.setScalar(f * 0.8); core.emissiveIntensity = CORE_EMISSIVE + f * 2.5; bladeMat.emissiveIntensity = BLADE_EMISSIVE + f * 2;
+      armor.emissive.setScalar(f * 0.8); core.emissiveIntensity = CORE_EMISSIVE + f * 2.5;
     }
+    // speed charge: blade glow 0.6 -> 2.4 over chargeFrom -> chargeTo (the full-lethal-slash speed), plus a streak above streakFrom. Speed is smoothed so the glow breathes, never pops.
+    spdS += (spdT - spdS) * (1 - Math.exp(-10 * dt));
+    const charge = clamp01((spdS - JUICE.chargeFrom) / (JUICE.chargeTo - JUICE.chargeFrom));
+    const fast = clamp01((spdS - JUICE.streakFrom) / (JUICE.chargeTo - JUICE.streakFrom));
+    const fl = flashT > 0 ? (flashT / FLASH_TIME) * flashPow : 0;
+    bladeMat.emissiveIntensity = JUICE.bladeGlowMin + (JUICE.bladeGlowMax - JUICE.bladeGlowMin) * charge + fl * 2;
+    const eb = 0.55 + 0.45 * charge;
+    edgeMat.color.setRGB(edgeCol.r * eb, edgeCol.g * eb, edgeCol.b * eb);       // the white-hot edge dims with the glow
+    if (fast > 0.02) {
+      streak.visible = true;
+      const w = 0.6 + 0.8 * fast, len = 0.25 + (JUICE.streakLen - 0.25) * fast;
+      streak.scale.set(w, w, len); streak.position.z = -BLADE.back - len / 2; streakMat.opacity = 0.7 * fast;
+    } else streak.visible = false;
+    // lean eases toward its target (never snaps)
+    const lk = 1 - Math.exp(-JUICE.tiltEase * dt);
+    leanX += (leanTX - leanX) * lk; leanZ += (leanTZ - leanZ) * lk;
+    if (mode === 'pod') applyPose();
+
     // blade pose (idle hover, or the slash timeline)
     const k = curH / total, bob = Math.sin(t * 2.3 + phase);
     const p = attackP;
@@ -237,7 +277,7 @@ function createPuppet(scene, color) {
       yawB = yawB + (-th - yawB) * on;                                    // blade points radially outward while slashing
       pitchB = pitchB * (1 - on);
       py = BLADE.pivot[1] + (py - BLADE.pivot[1]) * (1 - on);
-      stretch = 1 + 0.18 * on;
+      stretch = 1 + (0.18 + 0.12 * fast) * on;                            // a charged blade stretches a little more
       fade = 1 - sstep(SLASH.p1, SLASH.p1 + SLASH.trailFade, p);
     }
     bladeRig.position.set(-Math.sin(th) * ORBIT_R, py * k, Math.cos(th) * ORBIT_R);
@@ -251,7 +291,7 @@ function createPuppet(scene, color) {
       for (let i = 0; i <= n; i++) {
         const ui = i / n, age = u - ui;
         let al = 0;
-        if (age >= 0) al = Math.pow(Math.max(0, 1 - age / SLASH.trailTail), 1.4) * fade;
+        if (age >= 0) al = Math.pow(Math.max(0, 1 - age / (SLASH.trailTail + 0.3 * fast)), 1.4) * fade;   // a fast slash drags a longer crescent
         a[(i * 2) * 4 + 3] = al;                                          // outer edge: bright
         a[(i * 2 + 1) * 4 + 3] = al * 0.12;                               // inner edge: soft
       }
@@ -263,8 +303,13 @@ function createPuppet(scene, color) {
     pod,
     // squash / stretch the pod to the current collider height (metres). Feet stay at the origin.
     setHeight,
-    setFeet(x, y, z) { fx = x; fy = y; fz = z; if (mode === 'pod') place(); },
-    setYaw(a) { yaw = a; if (mode === 'pod') pod.quaternion.setFromAxisAngle(Y_AXIS, a); },
+    setFeet(x, y, z) { fx = x; fy = y; fz = z; if (mode === 'pod') applyPose(); },
+    setYaw(a) { yaw = a; if (mode === 'pod') applyPose(); },
+    setSpeed(unitsPerS) { spdT = unitsPerS; },
+    setLean(x, z) {                                                      // clamp to tiltMax, keep the direction
+      const a = Math.hypot(x, z), s = a > JUICE.tiltMax ? JUICE.tiltMax / a : 1;
+      leanTX = x * s; leanTZ = z * s;
+    },
     setMode,
     setAttack(v) { attackP = v; },
     flash(power = 1) { flashT = FLASH_TIME; flashPow = power; },

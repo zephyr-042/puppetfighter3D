@@ -2,7 +2,7 @@
 // PHYSICS: the player's movement rules as a function of (state, input). Ported verb by verb from the old physics.js.
 // Done so far: progressive momentum run (runT, plain run capped at RUN.max), jump (buffer, coyote time, rise / fall gravity),
 // Quake-style air-strafing (no air drag, no top speed), b-hop landing window, crouch-slide, dash burst, double jump,
-// wall-run + wall-kick, grapple / sticky hand (hold E / right mouse), automatic ledge mantle, Kinetic Slash (Left-Click: floating-blade cleave +
+// wall-run + wall-kick, dash with Phase-Dodge i-frames (`dodgeT`), grapple / sticky hand (hold E / right mouse), automatic ledge mantle, Kinetic Slash (Left-Click: floating-blade cleave +
 // magnetic lunge that hands your momentum back, see MELEE) and applyKnockback (what a hit does to the victim). Coming next: pillar orbit.
 // One state object per player (6 per match). `state.locked` (set by main.js while stunned, in countdown or round / match end)
 // makes stepPlayer ignore the input snapshot, so knockback plays out under normal gravity / friction with no steering.
@@ -25,6 +25,7 @@ export function createPlayerState() {
            sliding: false, slideBoostCd: 0, height: m(PUPPET.height),
            wasGrounded: true, airT: 0, bhopTimer: 0, bhopChain: 0,
            dashT: 0, dashCd: 0, dashX: 0, dashZ: 1, dashSpeed: 0,
+           dodgeT: 0,          // s of Phase-Dodge i-frames left (set to DASH.dodgeIframes when F dashes, ticks down by STEP; main.js ignores server hits while > 0)
            airJumpsLeft: JUMP.maxAirJumps, climbing: false,
            wallRunning: false, wallSide: 0, wallN: { x: 0, z: 0 }, wallT: { x: 0, z: 0 },
            regrabTimer: 0, lastWallN: null, wallDropCd: 0,
@@ -131,6 +132,7 @@ export function stepPlayer(s, inp, ctx) {
   // ---- timers
   if (s.dashCd > 0) s.dashCd = Math.max(0, s.dashCd - STEP);
   if (s.dashT > 0) s.dashT = Math.max(0, s.dashT - STEP);
+  if (s.dodgeT > 0) s.dodgeT = Math.max(0, s.dodgeT - STEP);
   if (s.slideBoostCd > 0) s.slideBoostCd = Math.max(0, s.slideBoostCd - STEP);
   if (s.attackCd > 0) s.attackCd = Math.max(0, s.attackCd - STEP);
   if (s.attackT > 0) s.attackT = Math.max(0, s.attackT - STEP);
@@ -247,6 +249,7 @@ export function stepPlayer(s, inp, ctx) {
     s.dashX = dx; s.dashZ = dz;
     s.dashSpeed = Math.max(m(DASH.speed), Math.hypot(s.vx, s.vz));
     s.dashT = DASH.duration; s.dashCd = DASH.cooldown;
+    s.dodgeT = DASH.dodgeIframes;                             // Phase-Dodge: invulnerable for the first dodgeIframes seconds of the dash (independent of dashT, so a jump-cancel keeps it)
     s.sliding = false; s.sfx.push('dash');
   }
   const dashing = s.dashT > 0;

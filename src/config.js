@@ -86,6 +86,7 @@ export const DASH = {
   duration: 0.2,       // s the direction is locked
   cooldown: 1.3,       // s between dashes
   airGrav: 250,        // units / s^2 while dashing (floaty, so a dash carries across gaps)
+  dodgeIframes: 0.16,  // s of Phase-Dodge invulnerability from the moment F triggers a dash (state.dodgeT): a server 'hit' that arrives in this window is ignored locally
 };
 
 // ---- grapple / sticky hand (hold E or right mouse): hooks level geometry or another player, pulls you toward the anchor
@@ -162,6 +163,26 @@ export const MELEE = {
   regenRate: 8,        // hit points / s (server) once regeneration has started
   radiusPad: 14,       // old units (0.35 m, the pod radius): server adds this to `reach` because it measures to the capsule axis
   vertical: 88,        // old units (2.2 m): max vertical distance between the two capsule centres for a slash to connect
+};
+
+// ---- juice (Slice M1): speed-charged blade, pod lean, hit-stop and camera shake. Purely visual / feel: nothing here touches movement or the server.
+export const JUICE = {
+  chargeFrom: 300,     // units / s: horizontal speed where the blade starts to charge (= MELEE.dmgSpeedMin)
+  chargeTo: 760,       // units / s: speed where the blade is fully charged = full 75 damage lethal slash (= MELEE.dmgSpeedMax)
+  bladeGlowMin: 0.6,   // blade emissiveIntensity at chargeFrom (and below)
+  bladeGlowMax: 2.4,   // blade emissiveIntensity at chargeTo
+  streakFrom: 500,     // units / s: above this the blade's glow trail lengthens (streak behind the hilt + a longer slash crescent)
+  streakLen: 1.4,      // m: length of the glow streak at chargeTo
+  tiltMax: 0.22,       // rad: most the pod leans into its horizontal movement / dodge direction
+  tiltSpeed: 500,      // units / s: speed at which the lean is at full tilt (a dodge always leans fully)
+  tiltEase: 12,        // 1 / s: how fast the lean follows (smooth, never snaps)
+  heavyDmg: 60,        // damage at or above which YOUR landed hit gets hit-stop + shake (a KO always does)
+  hitStop: 0.045,      // s the camera + blade animation freeze when you land a heavy hit / KO
+  shakeHeavy: 0.06,    // m: camera shake impulse of a heavy hit you land
+  shakeKO: 0.11,       // m: camera shake impulse of a KO you score
+  shakeHurt: 0.05,     // m: small shake when a hit sends YOUR pod tumbling
+  shakeDecay: 16,      // 1 / s: exponential decay of the shake
+  dodgeFlash: 0.35,    // s the crosshair flashes after a "DODGED!"
 };
 
 // ---- movement

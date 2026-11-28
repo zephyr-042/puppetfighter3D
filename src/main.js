@@ -10,12 +10,14 @@
 // Melee (Kinetic Slash): Left-Click -> stepPlayer starts the swing + magnetic lunge -> 'slash' { dir, speed } goes to the server, which judges it and answers every client
 // with 'hit' / 'killFeed' ('slashFx' shows other players' swings). A hit on YOU applies the knockback; a heavy hit (or a KO) sends your pod tumbling as the ragdoll.
 // HUD: HP bar (bottom centre), hit-marker round the crosshair, kill feed (top right), red vignette when hit.
+// Slice M1 (feel): Phase-Dodge i-frames (a server 'hit' that arrives while state.dodgeT > 0 is ignored locally: "DODGED!" + crosshair flash + phase whoosh),
+// speed-charged blade + pod lean (fed to the puppets every frame), and impact juice (0.045 s hit-stop freeze of camera + blade animation and a camera shake when you land a heavy hit / KO).
 // Audio: createAudio() below is a zero-asset Web Audio synth (oscillator sweeps + filtered noise), unlocked by the first click / keypress, [M] mutes.
 // Loads after: everything
 
 import * as THREE from 'three';
 import { io } from 'socket.io-client';
-import { STEP, MAX_STEPS_PER_FRAME, SCALE, RUN, CAM, PUPPET, GRAPPLE, MELEE, MAP, m } from './config.js';
+import { STEP, MAX_STEPS_PER_FRAME, SCALE, RUN, CAM, PUPPET, GRAPPLE, MELEE, MAP, JUICE, m } from './config.js';
 import DISTRICT_MAP from './game/maps.js';
 import { createWorld, addPlayerCapsule, stepWorld, feetPos, placePlayer, hasFallen } from './physics/world.js';
 import { createPlayerState, stepPlayer, endGrapple, torsoPos, applyKnockback } from './physics/player.js';
@@ -106,6 +108,8 @@ function createAudio(toast) {                                   // toast(msg): o
                 tone('sawtooth', 1900, 420, 0.16, 0.08 * v); tone('sine', 230, 90, 0.12, 0.16 * v); },                          // energy hum + body
     impact(v) { tone('sine', 190, 42, 0.20, 0.28 + 0.20 * v); noise('lowpass', 2200, 260, 0.8, 0.14, 0.20 + 0.14 * v);           // thud + crack
                 tone('square', 1250, 320, 0.07, 0.06 + 0.05 * v); tone('triangle', 880, 2400, 0.05, 0.05 * v, 0.012); },        // metallic ring
+    phase(v)  { noise('bandpass', 4200, 600, 1.4, 0.24, 0.30 * v); tone('sine', 1900, 420, 0.16, 0.14 * v);                           // Phase-Dodge: crisp falling whoosh
+                tone('triangle', 520, 1500, 0.12, 0.08 * v, 0.03); noise('highpass', 6000, 9000, 0.7, 0.07, 0.07 * v); },              // + a rising shimmer
     hurt(v)   { tone('sine', 120, 38, 0.26, 0.30 * v); noise('lowpass', 1400, 200, 0.7, 0.20, 0.18 * v); tone('sawtooth', 300, 90, 0.18, 0.06 * v); },   // you got hit
     ko(v)     { tone('sine', 110, 28, 0.60, 0.40 * v); noise('bandpass', 3400, 160, 0.8, 0.50, 0.24 * v);                         // sub boom + falling noise
                 tone('triangle', 660, 140, 0.45, 0.13 * v); tone('sawtooth', 1500, 300, 0.30, 0.06 * v, 0.03); }
@@ -132,6 +136,7 @@ async function boot() {
                hpBox: $('hpBox'), hpNum: $('hpNum'), koNum: $('koNum'), hpFill: $('hpFill'), hpGhost: $('hpGhost'), slashFill: $('slashFill'),
                hit: $('hitmarker'), hurt: $('hurt'), feed: $('killFeed') };
   let toastT = 0;
+  let hitStopT = 0, shakeAmp = 0, dodgeFlashT = 0, xhairFlashing = false;   // Slice M1: hit-stop freeze (s), camera shake impulse (m), crosshair dodge flash (s)
   const toast = (msg, t = 1.6) => { el.toast.textContent = msg; toastT = t; };
 
   // ---- world / scene ------------------------------------------------------------------------------------------------------------
@@ -298,6 +303,7 @@ async function boot() {
     const t = r.tgt;
     t.x = d.x; t.y = d.y; t.z = d.z; t.yaw = d.yaw; t.height = d.height || t.height;
     r.vel.x = d.vx; r.vel.y = d.vy; r.vel.z = d.vz;
+    r.dashing = !!d.dashing;                                // their dash: the pod leans fully into it
     r.grappleActive = !!d.grappleActive; r.anchor = d.grappleAnchor || null;
     if (d.ko !== undefined) r.ko = d.ko | 0;
     if (d.ping !== undefined) r.ping = d.ping | 0;
@@ -316,6 +322,17 @@ async function boot() {
     }
   }
 
+  // Pod lean target (world-space, |l| <= JUICE.tiltMax rad, the pod tips toward +l): into the horizontal travel direction, scaling up to full tilt at JUICE.tiltSpeed units / s;
+  // `full` (a dash / dodge) leans all the way regardless of speed.
+  const _lean = { x: 0, z: 0 };
+  function leanTarget(vx, vz, full) {
+    const h = Math.hypot(vx, vz);
+    if (h < 1e-3) { _lean.x = _lean.z = 0; return _lean; }
+    const a = JUICE.tiltMax * (full ? 1 : Math.min(1, h / SCALE / JUICE.tiltSpeed));
+    _lean.x = vx / h * a; _lean.z = vz / h * a;
+    return _lean;
+  }
+
   function updateRemote(r, k, dt) {
     const c = r.cur, t = r.tgt, dx = t.x - c.x, dy = t.y - c.y, dz = t.z - c.z;
     if (dx * dx + dy * dy + dz * dz > SNAP_DIST * SNAP_DIST) { c.x = t.x; c.y = t.y; c.z = t.z; c.yaw = t.yaw; c.height = t.height; }
@@ -326,13 +343,15 @@ async function boot() {
     }
     const pu = r.puppet;
     if (r.attackT > 0) r.attackT = Math.max(0, r.attackT - dt);
-    if (r.rag) { syncRagdollMeshes(r.rag, pu.pod, r.torso); pu.setMode('ragdoll'); pu.setAttack(-1); }      // the SAME pod, now driven by the physics body
+    if (r.rag) { syncRagdollMeshes(r.rag, pu.pod, r.torso); pu.setMode('ragdoll'); pu.setAttack(-1); pu.setSpeed(0); pu.setLean(0, 0); }      // the SAME pod, now driven by the physics body
     else {
       pu.setMode('pod');
       pu.setFeet(c.x, c.y, c.z); pu.setHeight(c.height);
       if (r.attackT > 0) c.yaw += angDiff(c.yaw, r.attackYaw) * (1 - Math.exp(-40 * dt));       // face the slash direction while the blade sweeps
       pu.setYaw(c.yaw);
       pu.setAttack(r.attackT > 0 ? Math.min(0.999, 1 - r.attackT / MELEE.attackTime) : -1);
+      pu.setSpeed(Math.hypot(r.vel.x, r.vel.z) / SCALE);                // their blade glows with THEIR speed: you can read a fully charged (75 damage) opponent
+      const L = leanTarget(r.vel.x, r.vel.z, r.dashing); pu.setLean(L.x, L.z);
     }
     if (r.slot > 0) {                                       // floating grapple tether
       if (r.grappleActive && r.anchor && !r.rag) {
@@ -435,18 +454,22 @@ async function boot() {
   socket.on('hit', ({ attackerId, targetId, damage, knockVec, kill, hp }) => {
     if (!joined) return;
     const power = Math.min(1, damage / MELEE.maxDmg);
-    if (targetId === myId) {
+    if (targetId === myId && me.dodgeT > 0 && !kill && !awaiting && !tumbling) onDodged();   // Phase-Dodge: inside the i-frames the hit passes through (no knockback / stun / tumble / vignette)
+    else if (targetId === myId) {                                    // (a LETHAL hit is never dodged: the server has already KO'd you, so the tumble + respawn must follow)
       setHp(hp); flashHurt(); audio.play('hurt', 0.55 + 0.45 * power);
       if (!awaiting && !tumbling) {
         const heavy = Math.hypot(knockVec.x, knockVec.z) >= m(MELEE.tumbleKnock);
-        if (kill || heavy) startTumble(knockVec, kill);                  // heavy hit / KO: the pod tumbles
+        if (kill || heavy) { startTumble(knockVec, kill); shakeAmp = Math.max(shakeAmp, JUICE.shakeHurt); }   // heavy hit / KO: the pod tumbles
         else applyKnockback(me, knockVec.x, knockVec.y, knockVec.z);     // light hit: a stagger + knockback under normal gravity
       }
     } else {
       const r = remotes.get(targetId);
       if (r) { r.hp = hp; r.puppet.flash(0.6 + 0.4 * power); }
     }
-    if (attackerId === myId) { popHitmarker(kill); audio.play('impact', power); }
+    if (attackerId === myId) {
+      popHitmarker(kill); audio.play('impact', power);
+      if (kill || damage >= JUICE.heavyDmg) { hitStopT = JUICE.hitStop; shakeAmp = Math.max(shakeAmp, kill ? JUICE.shakeKO : JUICE.shakeHeavy); }   // impact juice: freeze, then shake
+    }
     else if (targetId !== myId) { const r = remotes.get(targetId); audio.play('impact', (r ? soundVol(r.cur) : 0.3) * power); }
   });
   socket.on('killFeed', (k) => {
@@ -455,6 +478,11 @@ async function boot() {
     audio.play('ko', k.killerId === myId || k.victimId === myId ? 1 : 0.4);
     if (k.killerId === myId) { if (k.cause === 'void') popHitmarker(true); toast('KO  +1   ' + k.victimName, 1.4); }
   });
+  function onDodged() {                                     // a server hit landed on you inside the dodge i-frames
+    toast('DODGED!', 0.9); dodgeFlashT = JUICE.dodgeFlash;
+    audio.play('phase');
+    if (localPuppet) localPuppet.flash(0.7);
+  }
   function setHp(h) { myHp = Math.max(0, Math.min(myMaxHp, Number(h) || 0)); }
 
   // ---- join overlay ----------------------------------------------------------------------------------------------------------------
@@ -518,7 +546,7 @@ async function boot() {
     if (snap.attack && !down) snap.melee = meleeAim();
     const wasOnGround = pv.player.grounded;
     stepPlayer(me, snap, pv);
-    for (const e of me.sfx) audio.play(e);
+    for (const e of me.sfx) { audio.play(e); if (e === 'dash' && localPuppet) localPuppet.flash(0.35); }   // a pulse on the pod marks the i-frames
     if (me.slashEvt) {                                      // the swing started: ask the server to judge it (it owns cooldown, cone, reach, damage)
       const e = me.slashEvt; me.slashEvt = null;
       if (socket.connected) socket.emit('slash', { dir: { x: r3(e.dirX), z: r3(e.dirZ) }, speed: Math.round(e.speed) });
@@ -580,7 +608,7 @@ async function boot() {
       '  GRAPPLE ' + (hs.grappleActive ? 'GO' : hs.grappleCd > 0 ? hs.grappleCd.toFixed(1) + 's' : 'ready') +
       (hs.wallRunning ? '  WALLRUN' : hs.regrabTimer > 0 ? '  regrab ' + hs.regrabTimer.toFixed(2) + 's' : '') +
       (hs.sliding ? '  SLIDE' : '') + (hs.slideBoostCd > 0 ? '  slideboost ' + hs.slideBoostCd.toFixed(2) + 's' : '  slideboost ready') +
-      '  SLASH ' + (hs.attackCd > 0 ? hs.attackCd.toFixed(2) + 's' : 'ready');
+      '  SLASH ' + (hs.attackCd > 0 ? hs.attackCd.toFixed(2) + 's' : 'ready') + (hs.dodgeT > 0 ? '  PHASE' : '');
 
     // HP bar (bottom centre): the fill snaps down at once, the pale ghost trails behind (CSS transition); colour steps cyan -> amber -> coral
     el.hpBox.style.display = joined ? 'block' : 'none';
@@ -600,6 +628,14 @@ async function boot() {
       xhairText = gtxt; el.gstat.textContent = gtxt;
       el.xhair.style.background = hs.grappleActive ? '#7fe9ff' : hs.grappleCd > 0 ? '#ff6b6b' : '#fff';
     }
+    // "DODGED!" crosshair flash: the dot swells and glows cyan, then settles back (the normal grapple colour is re-applied through xhairText)
+    if (dodgeFlashT > 0) {
+      dodgeFlashT = Math.max(0, dodgeFlashT - dt);
+      const f = dodgeFlashT / JUICE.dodgeFlash;
+      el.xhair.style.background = '#bff6ff'; el.xhair.style.transform = 'scale(' + (1 + 2.6 * f).toFixed(2) + ')';
+      el.xhair.style.boxShadow = '0 0 0 1px rgba(0, 0, 0, .7), 0 0 ' + Math.round(10 + 22 * f) + 'px #00e5ff, 0 0 ' + Math.round(6 + 16 * f) + 'px #7fe9ff';
+      xhairFlashing = true;
+    } else if (xhairFlashing) { xhairFlashing = false; el.xhair.style.transform = ''; el.xhair.style.boxShadow = ''; xhairText = ''; }
   }
 
   // ---- render loop: accumulate real time, run whole ticks, then draw -----------------------------------------------------------------
@@ -615,8 +651,8 @@ async function boot() {
     // your pod: the tumbling ragdoll while down (the same pod mesh, driven by the physics body), otherwise standing on the capsule, squashed to the collider height,
     // facing the slash direction during a swing (the blade sweep is interpolated between sim ticks with the accumulator `acc`)
     if (joined && localPuppet) {
-      if (localRag) { syncRagdollMeshes(localRag, localPuppet.pod, localTorso); localPuppet.setMode('ragdoll'); localPuppet.setAttack(-1); }
-      else if (awaiting) { localPuppet.setMode('hidden'); localPuppet.setAttack(-1); }
+      if (localRag) { syncRagdollMeshes(localRag, localPuppet.pod, localTorso); localPuppet.setMode('ragdoll'); localPuppet.setAttack(-1); localPuppet.setSpeed(0); localPuppet.setLean(0, 0); }
+      else if (awaiting) { localPuppet.setMode('hidden'); localPuppet.setAttack(-1); localPuppet.setSpeed(0); localPuppet.setLean(0, 0); }
       else {
         const f = feetPos(pv), swinging = me.attackT > 0;
         localPuppet.setMode('pod');
@@ -624,6 +660,9 @@ async function boot() {
         localYaw += angDiff(localYaw, swinging ? me.attackYaw : me.facing) * (1 - Math.exp(-(swinging ? 40 : 14) * dt));
         localPuppet.setYaw(localYaw);
         localPuppet.setAttack(swinging ? Math.min(0.999, (MELEE.attackTime - me.attackT + acc) / MELEE.attackTime) : -1);
+        localPuppet.setSpeed(Math.hypot(me.vx, me.vz) / SCALE);            // blade charge glow + streak follow your horizontal speed
+        const L = me.dodgeT > 0 ? leanTarget(me.dashX, me.dashZ, true) : leanTarget(me.vx, me.vz, false);   // lean into the run, fully into a dodge
+        localPuppet.setLean(L.x, L.z);
       }
       if (me.grappleActive && !awaiting) view.setGrapple(0, torsoPos(pv, me), me.grappleAnchor); else view.setGrapple(0, null);
     }
@@ -631,17 +670,28 @@ async function boot() {
     // everybody else: exponential smoothing toward the latest snapshot
     const k = 1 - Math.exp(-SMOOTH * dt);
     for (const r of remotes.values()) updateRemote(r, k, dt);
-    view.update(dt);                                        // floating blades, slash trails, hit flashes
+    const frozen = hitStopT > 0;                            // hit-stop: for JUICE.hitStop seconds the blade animation and the camera hold still (the simulation keeps running)
+    if (frozen) hitStopT = Math.max(0, hitStopT - dt);
+    else view.update(dt);                                   // floating blades, slash trails, hit flashes, speed glow, lean
 
     // chase camera: your capsule, or your tumbling torso while you are down
     const hv = pv, hSpeed = Math.hypot(me.vx, me.vz);
     let focus;
     if (localRag) {
       focus = localTorso;
-      updateCamera(rig, view.camera, hv, focus, dt, 0.15, 0, 0);
+      if (!frozen) updateCamera(rig, view.camera, hv, focus, dt, 0.15, 0, 0);
     } else {
       focus = feetPos(hv);
-      updateCamera(rig, view.camera, hv, focus, dt, m(CAM.pivot) * me.height / m(PUPPET.height), hSpeed, me.wallRunning ? me.wallSide : 0);
+      if (!frozen) updateCamera(rig, view.camera, hv, focus, dt, m(CAM.pivot) * me.height / m(PUPPET.height), hSpeed, me.wallRunning ? me.wallSide : 0);
+    }
+    // camera shake: a decaying random jolt added AFTER updateCamera (which rebuilds position + look every frame, so nothing accumulates)
+    if (!frozen) {
+      if (shakeAmp > 0.0004) {
+        const cam = view.camera, a = shakeAmp;
+        cam.position.x += (Math.random() * 2 - 1) * a; cam.position.y += (Math.random() * 2 - 1) * a * 0.7; cam.position.z += (Math.random() * 2 - 1) * a;
+        cam.rotateZ((Math.random() * 2 - 1) * a * 0.12);
+        shakeAmp *= Math.exp(-JUICE.shakeDecay * dt);
+      } else shakeAmp = 0;
     }
     view.setFocus(focus);
     audio.setMotion(hSpeed / SCALE, me.sliding && hv.player.grounded && !localRag);   // slide hiss + high-speed wind (loops follow the speed)
