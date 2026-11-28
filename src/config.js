@@ -119,6 +119,10 @@ export const SLIDE = {
   slopeAccel: 650,     // units / s^2 added along the slide direction while sliding DOWNHILL (grounded and the move went down: c.y < -1e-4)
   minSpeed: 60,        // units / s: below this the facing direction is used for the boost, and steering may still creep up to this speed
   resize: 14,          // how fast the capsule height eases between standing and sliding (1 / s)
+  entryMinSpeed: 230,  // old units / s: you must be running near full speed (or landing from the air at >= 170, or on a downhill) to START a slide; below this Shift = a plain crouch
+  exitSpeed: 150,      // old units / s: a slide that decays below this on flat ground (outside the b-hop window) settles into a crouch instead of drifting on
+  crouchSpeed: 125,    // old units / s: steady crouch-walk speed
+  landEntrySpeed: 170, // old units / s: the lower entry speed that counts when you just landed from a jump / wall-run / grapple
 };
 
 // ---- ledge mantle / vault: an airborne player who is blocked by a ledge top that is 12..48 units above the feet is popped up and over it,

@@ -22,7 +22,7 @@ export const IDLE_INPUT = Object.freeze({ ax: 0, az: 0, moving: false, fwd: fals
 
 export function createPlayerState() {
   return { vx: 0, vz: 0, vy: 0, facing: 0, runT: 0, isIt: false, locked: false, wallHit: false, jumpBuf: 0, coyote: 0,
-           sliding: false, slideBoostCd: 0, height: m(PUPPET.height),
+           sliding: false, crouching: false, downhill: false, slideBoostCd: 0, height: m(PUPPET.height),   // crouching: slow Shift on the ground (SLIDE.crouchSpeed, no boost); downhill: the last move went down a slope
            wasGrounded: true, airT: 0, bhopTimer: 0, bhopChain: 0,
            dashT: 0, dashCd: 0, dashX: 0, dashZ: 1, dashSpeed: 0,
            dashElapsed: 0,     // s since the current dash started (the server treats the first DASH.dodgeIframes s as Phase-Dodge i-frames)
@@ -69,7 +69,7 @@ export function applyKnockback(s, kx, ky, kz, stun = MELEE.hitStun) {
   s.vx += kx; s.vz += kz;
   s.vy = Math.max(s.vy, 0) + ky;
   s.stunT = Math.max(s.stunT, stun);
-  s.lungeT = 0; s.dashT = 0; s.sliding = false; s.wallRunning = false; s.mantleT = 0; s.bhopTimer = 0; s.diving = false;
+  s.lungeT = 0; s.dashT = 0; s.sliding = false; s.crouching = false; s.wallRunning = false; s.mantleT = 0; s.bhopTimer = 0; s.diving = false;
   if (s.grappleActive) endGrapple(s);
 }
 
@@ -82,7 +82,8 @@ export function runSpeed(s) {
 // runT bookkeeping. Grows only on clean ground running; held in the air (so jumps / slides / dashes keep it);
 // drains fast when the player lets go of the keys or runs into something.
 function updateRunT(s, inp, grounded) {
-  if (s.wallHit) s.runT -= STEP * RUN.wallDecay;
+  if (s.crouching) s.runT = 0;                                // a crouch holds no running momentum
+  else if (s.wallHit) s.runT -= STEP * RUN.wallDecay;
   else if (s.sliding) { /* a slide holds the momentum: no growth, no decay */ }
   else if (inp.moving) { if (grounded) s.runT += STEP; }
   else if (grounded) s.runT -= STEP * RUN.stopDecay;
@@ -323,25 +324,37 @@ export function stepPlayer(s, inp, ctx) {
   }
   if (s.wallRunning || grappling) s.lungeT = 0;               // catching a wall / a hook mid-lunge: that verb owns the velocity now
 
-  // ---- slide state: Shift held on the ground enters (with the Titanfall-style boost), releasing / jumping / leaving the ground ends it.
+  // ---- slide / crouch state. Shift on the ground: fast enough (SLIDE.entryMinSpeed), landing from the air (>= landEntrySpeed) or on a downhill = a momentum SLIDE (with the
+  // Titanfall-style boost); otherwise a plain CROUCH (SLIDE.crouchSpeed, no boost). A slide that slows below SLIDE.exitSpeed on flat ground becomes a crouch.
+  // Releasing Shift / jumping / leaving the ground ends either.
   // Slide-hop: Shift stays held through a jump, so the landing re-enters the slide at once (inside the b-hop window it keeps all its
   // speed, and a Space press there jumps straight out of it with the b-hop bonus). A jump / launch always clears `sliding` first, so
   // the capsule stands back up in the air and the chain never gets stuck crouched.
-  if (jumped || launched || dashing || s.wallRunning || grappling) s.sliding = false;
-  else if (s.sliding && (!inp.slide || (!grounded && s.coyote <= 0))) s.sliding = false;
-  else if (!s.sliding && inp.slide && grounded) {
-    s.sliding = true;
-    if (s.slideBoostCd <= 0) {                                // flat burst: along the velocity, or the facing when (nearly) standing still
-      const v = Math.hypot(s.vx, s.vz), cap = m(SLIDE.maxBoostSpeed);
-      const add = Math.min(m(SLIDE.boostAdd), cap - v);       // a speed already above the cap is kept: no boost, no clamp
-      if (add > 1e-4) {
-        let dx, dz;
-        if (v > m(SLIDE.minSpeed)) { dx = s.vx / v; dz = s.vz / v; }
-        else { dx = Math.sin(s.facing); dz = Math.cos(s.facing); }
-        s.vx += dx * add; s.vz += dz * add;
-        s.slideBoostCd = SLIDE.boostCd;
+  if (jumped || launched || dashing || s.wallRunning || grappling) { s.sliding = false; s.crouching = false; }
+  else if (!inp.slide || (!grounded && s.coyote <= 0)) { s.sliding = false; s.crouching = false; }   // releasing Shift / leaving the ground ends both
+  else if (s.sliding) {
+    // a slide that has run out of speed on flat ground (and is not inside the b-hop landing window) settles into a crouch: no endless drifting
+    if (grounded && s.bhopTimer <= 0 && !s.downhill && Math.hypot(s.vx, s.vz) < m(SLIDE.exitSpeed)) { s.sliding = false; s.crouching = true; }
+  } else if (s.crouching) {
+    // crouch-walking down a slope turns into a slide (no boost: the slope itself accelerates it)
+    if (grounded && s.downhill && Math.hypot(s.vx, s.vz) >= m(SLIDE.minSpeed)) { s.crouching = false; s.sliding = true; }
+  } else if (grounded) {                                      // Shift pressed (or still held) on the ground: slide or crouch?
+    const v = Math.hypot(s.vx, s.vz);
+    const recentLand = landed || s.bhopTimer > 0;             // just came down from a jump / wall-run / grapple / fall
+    if (v >= m(SLIDE.entryMinSpeed) || (recentLand && v >= m(SLIDE.landEntrySpeed)) || (s.downhill && v >= m(SLIDE.minSpeed))) {
+      s.sliding = true;
+      if (s.slideBoostCd <= 0) {                              // flat burst: along the velocity (v is above minSpeed on every path in here except a crawl down a slope: then the facing)
+        const cap = m(SLIDE.maxBoostSpeed);
+        const add = Math.min(m(SLIDE.boostAdd), cap - v);     // a speed already above the cap is kept: no boost, no clamp
+        if (add > 1e-4) {
+          let dx, dz;
+          if (v > m(SLIDE.minSpeed)) { dx = s.vx / v; dz = s.vz / v; }
+          else { dx = Math.sin(s.facing); dz = Math.cos(s.facing); }
+          s.vx += dx * add; s.vz += dz * add;
+          s.slideBoostCd = SLIDE.boostCd;
+        }
       }
-    }
+    } else s.crouching = true;                                // standing still / walking slowly: a plain crouch, zero boost
   }
 
   // ---- horizontal
@@ -370,6 +383,11 @@ export function stepPlayer(s, inp, ctx) {
       const v = Math.hypot(s.vx, s.vz);
       if (v > cap) { s.vx *= cap / v; s.vz *= cap / v; }
     }
+  } else if (s.crouching && grounded && !jumped && !grapJump) {   // crouch-walk: velocity chases crouchSpeed toward the keys, or 0 with no keys (a clean stop, no drifting)
+    const k = Math.min(1, STEP * MOVE.accel * 2), cs = m(SLIDE.crouchSpeed);
+    s.vx += ((inp.moving ? inp.ax * cs : 0) - s.vx) * k;
+    s.vz += ((inp.moving ? inp.az * cs : 0) - s.vz) * k;
+    if (!inp.moving && Math.hypot(s.vx, s.vz) < 0.05) { s.vx = 0; s.vz = 0; }
   } else if (grounded && !jumped && !grapJump) {
     if (s.bhopTimer > 0) { /* landing window: no friction, no run-speed clamp, speed is preserved */ }
     else {                                                    // normal ground: velocity chases the wanted velocity, so speed above
@@ -402,7 +420,7 @@ export function stepPlayer(s, inp, ctx) {
 
   // ---- capsule height: eases to the slide height while sliding, back to standing only when there is headroom
   const standH = m(PUPPET.height), slideH = m(SLIDE.height);
-  let target = s.sliding ? slideH : standH;
+  let target = (s.sliding || s.crouching) ? slideH : standH;
   if (target > s.height + 1e-6 && !hasHeadroom(ctx, standH)) target = slideH;   // low ceiling: stay crouched
   let h = s.height + (target - s.height) * Math.min(1, STEP * SLIDE.resize);
   if (Math.abs(target - h) < 0.004) h = target;
@@ -465,6 +483,7 @@ export function stepPlayer(s, inp, ctx) {
 
   // downhill slide: the move went DOWN (c.y < -1e-4) while grounded, so add slopeAccel along the slide direction (ramps = speed).
   // (-c.y must also beat 2 % of the horizontal travel, which ignores the sub-millimetre jitter of the ground stick on flat floors.)
+  s.downhill = grounded && c.y < -1e-4 && -c.y > got * 0.02 && got > m(SLIDE.minSpeed) * STEP;   // read next tick: keeps a slide going / promotes a crouch on a slope
   if (s.sliding && grounded && c.y < -1e-4 && -c.y > got * 0.02) {
     const v = Math.hypot(s.vx, s.vz);
     const dx = v > 1e-3 ? s.vx / v : Math.sin(s.facing), dz = v > 1e-3 ? s.vz / v : Math.cos(s.facing);
