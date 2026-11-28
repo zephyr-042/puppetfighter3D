@@ -2,14 +2,15 @@
 // PHYSICS: the player's movement rules as a function of (state, input). Ported verb by verb from the old physics.js.
 // Done so far: progressive momentum run (runT, plain run capped at RUN.max), jump (buffer, coyote time, rise / fall gravity),
 // Quake-style air-strafing (no air drag, no top speed), b-hop landing window, crouch-slide, dash burst, double jump,
-// wall-run + wall-kick, grapple / sticky hand (hold E / right mouse), automatic ledge mantle. Coming next: pillar orbit.
+// wall-run + wall-kick, grapple / sticky hand (hold E / right mouse), automatic ledge mantle, Kinetic Slash (Left-Click: floating-blade cleave +
+// magnetic lunge that hands your momentum back, see MELEE) and applyKnockback (what a hit does to the victim). Coming next: pillar orbit.
 // One state object per player (6 per match). `state.locked` (set by main.js while stunned, in countdown or round / match end)
 // makes stepPlayer ignore the input snapshot, so knockback plays out under normal gravity / friction with no steering.
 // Loads after: config.js, physics/world.js
 // Speeds in `state` are in METRES / s (already scaled); config numbers are in old units and go through m().
 
 // MAX_FLOW_SPEED (below) is the soft aerodynamic ceiling on horizontal speed.
-import { STEP, m, PUPPET, RUN, MOVE, JUMP, BHOP, DASH, SLIDE, WALLRUN, GRAPPLE, MANTLE } from '../config.js';
+import { STEP, SCALE, m, PUPPET, RUN, MOVE, JUMP, BHOP, DASH, SLIDE, WALLRUN, GRAPPLE, MANTLE, MELEE } from '../config.js';
 import { movePlayer, hasHeadroom, detectWall, groundGap, raycastGrapple, feetPos, checkLedgeMantle } from './world.js';
 
 // Soft aerodynamic speed ceiling, old units / s (Titanfall 2 "flow" zone). Horizontal speed above it bleeds back toward it
@@ -17,7 +18,7 @@ import { movePlayer, hasHeadroom, detectWall, groundGap, raycastGrapple, feetPos
 const MAX_FLOW_SPEED = 760;
 
 // Input snapshot with nothing pressed (used while a player is locked).
-export const IDLE_INPUT = Object.freeze({ ax: 0, az: 0, moving: false, fwd: false, jump: false, dash: false, slide: false, grapple: false });
+export const IDLE_INPUT = Object.freeze({ ax: 0, az: 0, moving: false, fwd: false, jump: false, dash: false, slide: false, grapple: false, attack: false });
 
 export function createPlayerState() {
   return { vx: 0, vz: 0, vy: 0, facing: 0, runT: 0, isIt: false, locked: false, wallHit: false, jumpBuf: 0, coyote: 0,
@@ -30,7 +31,11 @@ export function createPlayerState() {
            grappleActive: false, grappleAnchor: { x: 0, y: 0, z: 0 }, grappleTarget: -1, grappleT: 0, grappleCd: 0, grapplePrev: false,
            grappleHit: -1,     // grappleHit: index of a player the hook just reached (main.js consumes it: shove + stun)
            mantleT: 0,         // s left of the mantle forward-step window (see MANTLE)
-           sfx: [] };          // sound events of THIS tick ('jump' | 'airjump' | 'kick' | 'attach' | 'dash' | 'grapple'); cleared at the start of stepPlayer, read by main.js
+           attackT: 0, attackCd: 0, attackYaw: 0,                  // melee: s left of the blade swing (MELEE.attackTime), cooldown (MELEE.cooldown), yaw the pod faces during the swing
+           lungeT: 0, lungeX: 0, lungeZ: 1, lungeV: 0, lungePre: 0, // magnetic lunge: s left, direction, lunge speed (m / s), the momentum to hand back afterwards (m / s)
+           stunT: 0,           // s left of hit-stun (set by applyKnockback): input ignored, knockback plays out
+           slashEvt: null,     // { dirX, dirZ, speed } set on the tick a slash starts; main.js sends it to the server and clears it (speed = pre-lunge horizontal speed, old units / s)
+           sfx: [] };          // sound events of THIS tick ('jump' | 'airjump' | 'kick' | 'attach' | 'dash' | 'grapple' | 'slash'); cleared at the start of stepPlayer, read by main.js
 }
 
 // Torso point (metres) where the grapple rope leaves the body and the pull is measured from.
@@ -42,6 +47,22 @@ export function torsoPos(ctx, s) {
 // Release the hook and start the cooldown (also used by main.js when the hooked player goes down or the round changes).
 export function endGrapple(s, cd = GRAPPLE.cooldown) {
   s.grappleActive = false; s.grappleTarget = -1; s.grappleT = 0; s.grappleCd = cd;
+}
+
+// A confirmed hit on THIS player (main.js calls it for the 'hit' event whose targetId is you). (kx, ky, kz) is the knockback velocity in m / s.
+// Velocity that points back at the attacker is cancelled first (so running into a slash cannot eat the knockback), then the knockback is added;
+// the vertical part lifts the pod off the floor so ground friction cannot swallow it. Grapple, dash, slide and any lunge are cut, input is ignored for `stun`.
+export function applyKnockback(s, kx, ky, kz, stun = MELEE.hitStun) {
+  const h = Math.hypot(kx, kz);
+  if (h > 1e-6) {
+    const dx = kx / h, dz = kz / h, along = s.vx * dx + s.vz * dz;
+    if (along < 0) { s.vx -= dx * along; s.vz -= dz * along; }
+  }
+  s.vx += kx; s.vz += kz;
+  s.vy = Math.max(s.vy, 0) + ky;
+  s.stunT = Math.max(s.stunT, stun);
+  s.lungeT = 0; s.dashT = 0; s.sliding = false; s.wallRunning = false; s.mantleT = 0; s.bhopTimer = 0;
+  if (s.grappleActive) endGrapple(s);
 }
 
 // ground top speed for the current momentum (old units -> metres). This is the PLAIN run speed; b-hop / air speed can exceed it.
@@ -89,6 +110,7 @@ function landingSoon(ctx, s) {
 
 // One fixed tick. `ctx` is the physics world (movePlayer moves the capsule and reports the result).
 export function stepPlayer(s, inp, ctx) {
+  if (s.stunT > 0) { s.stunT = Math.max(0, s.stunT - STEP); inp = IDLE_INPUT; }   // hit-stun: knockback plays out with no steering
   if (s.locked) inp = IDLE_INPUT;                             // stunned / frozen: no steering, jumps, dashes or slides (knockback keeps its velocity)
   s.sfx.length = 0;                                           // this tick's sound events (main.js plays them right after the step)
   const grounded = ctx.player.grounded;
@@ -110,6 +132,8 @@ export function stepPlayer(s, inp, ctx) {
   if (s.dashCd > 0) s.dashCd = Math.max(0, s.dashCd - STEP);
   if (s.dashT > 0) s.dashT = Math.max(0, s.dashT - STEP);
   if (s.slideBoostCd > 0) s.slideBoostCd = Math.max(0, s.slideBoostCd - STEP);
+  if (s.attackCd > 0) s.attackCd = Math.max(0, s.attackCd - STEP);
+  if (s.attackT > 0) s.attackT = Math.max(0, s.attackT - STEP);
   if (s.regrabTimer > 0) s.regrabTimer = Math.max(0, s.regrabTimer - STEP);
   if (s.wallDropCd > 0) s.wallDropCd = Math.max(0, s.wallDropCd - STEP);
   if (grounded) s.airJumpsLeft = JUMP.maxAirJumps;
@@ -228,6 +252,46 @@ export function stepPlayer(s, inp, ctx) {
   const dashing = s.dashT > 0;
   if (dashing) s.wallRunning = false;                         // a dash breaks away from the wall
 
+  // ---- Kinetic Slash (Left-Click -> inp.attack) + magnetic lunge. The slash itself (swing + hit request) always fires off cooldown; the LUNGE is only
+  // added when it would not fight another verb: not while dashing (already a locked burst), hooked (the pull owns the velocity) or wall-running (the
+  // rail is kept, you still slash). The lunge snaps the horizontal velocity along the aim (or onto the nearest opponent inside the cleave cone, see
+  // inp.melee.targets) at max(lungeSpeed, current speed) for lungeDuration, then hands back exactly the speed you came in with, so a slash chains straight into
+  // wall-runs and b-hops. Damage / knockback scale with that INCOMING horizontal speed, which the server re-checks (see s.slashEvt, main.js, server.js).
+  if (inp.attack && s.attackCd <= 0) {
+    const mel = inp.melee || null;
+    let ax = mel ? mel.dirX : Math.sin(s.facing), az = mel ? mel.dirZ : Math.cos(s.facing);
+    const al = Math.hypot(ax, az);
+    if (al > 1e-6) { ax /= al; az /= al; } else { ax = Math.sin(s.facing); az = Math.cos(s.facing); }
+    const pre = Math.hypot(s.vx, s.vz);
+
+    // magnetic lock: nearest opponent inside the cleave cone and reach (feet positions, metres)
+    let dirX = ax, dirZ = az, lockDist = -1;
+    if (mel && mel.targets && mel.targets.length) {
+      const f = feetPos(ctx), reach = m(MELEE.reach);
+      let best = Infinity;
+      for (const t of mel.targets) {
+        const dx = t.x - f.x, dz = t.z - f.z, d = Math.hypot(dx, dz);
+        if (d > reach || d >= best) continue;
+        if (d > 0.45 && (dx * ax + dz * az) / d < MELEE.coneCos) continue;      // (very close targets are inside the body: always inside the cone)
+        if (Math.abs((t.y + 0.9) - (f.y + s.height * 0.5)) > m(MELEE.vertical)) continue;
+        best = d; lockDist = d;
+        if (d > 0.45) { dirX = dx / d; dirZ = dz / d; } else { dirX = ax; dirZ = az; }
+      }
+    }
+
+    s.attackT = MELEE.attackTime; s.attackCd = MELEE.cooldown; s.attackYaw = Math.atan2(dirX, dirZ);
+    s.sfx.push('slash');
+    s.slashEvt = { dirX, dirZ, speed: Math.min(pre / SCALE, 2000) };
+
+    if (!dashing && !grappling && !s.wallRunning) {
+      const lv = Math.max(m(MELEE.lungeSpeed), pre);
+      let dur = MELEE.lungeDuration;
+      if (lockDist >= 0) dur = Math.min(dur, Math.max(0, (lockDist - m(MELEE.standOff)) / lv));   // stop standOff short of the locked target
+      if (dur > STEP * 0.5) { s.lungeT = dur; s.lungeX = dirX; s.lungeZ = dirZ; s.lungeV = lv; s.lungePre = pre; }
+    }
+  }
+  if (s.wallRunning || grappling) s.lungeT = 0;               // catching a wall / a hook mid-lunge: that verb owns the velocity now
+
   // ---- slide state: Shift held on the ground enters (with the Titanfall-style boost), releasing / jumping / leaving the ground ends it.
   // Slide-hop: Shift stays held through a jump, so the landing re-enters the slide at once (inside the b-hop window it keeps all its
   // speed, and a Space press there jumps straight out of it with the b-hop bonus). A jump / launch always clears `sliding` first, so
@@ -251,7 +315,12 @@ export function stepPlayer(s, inp, ctx) {
 
   // ---- horizontal
   const sp = runSpeed(s);
-  if (dashing) {                                              // locked burst
+  let lungeDone = false;
+  if (s.lungeT > 0 && !dashing) {                             // magnetic lunge: a crisp snap along the slash direction (no friction, no air-strafe)
+    s.lungeT = Math.max(0, s.lungeT - STEP);
+    s.vx = s.lungeX * s.lungeV; s.vz = s.lungeZ * s.lungeV;
+    lungeDone = s.lungeT <= 0;                                // the momentum is handed back after this tick's move (below)
+  } else if (dashing) {                                       // locked burst
     s.vx = s.dashX * s.dashSpeed; s.vz = s.dashZ * s.dashSpeed;
   } else if (s.wallRunning) {                                 // run along the wall: speed kept (min holdSpeed), aimed along the tangent
     const spd = Math.max(hs, m(WALLRUN.holdSpeed)), pin = m(WALLRUN.stick);
@@ -357,6 +426,9 @@ export function stepPlayer(s, inp, ctx) {
   const climbed = s.vy <= 0 && c.y > 1e-4;
   s.climbing = climbed;
   if (want > 1e-6 && got < want * 0.98 && !climbed && !mantled) { s.vx = c.x / STEP; s.vz = c.z / STEP; }
+
+  // lunge over: hand the incoming speed back along the slash direction (unless a wall stopped the lunge, then the clamped velocity stands)
+  if (lungeDone && got >= want * 0.7) { s.vx = s.lungeX * s.lungePre; s.vz = s.lungeZ * s.lungePre; }
 
   // downhill slide: the move went DOWN (c.y < -1e-4) while grounded, so add slopeAccel along the slide direction (ramps = speed).
   // (-c.y must also beat 2 % of the horizontal travel, which ignores the sub-millimetre jitter of the ground stick on flat floors.)

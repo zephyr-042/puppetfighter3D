@@ -6,17 +6,20 @@
 // One local tick (STEP = 1/60):
 //   1. read input -> stepPlayer (queues the kinematic move)      2. stepWorld (capsule moves, ragdolls tumble)
 //   3. fell below the map / R pressed -> local ragdoll + 'respawnReq'     4. every 2nd tick: send 'state'
-// Remote players are cosmetic: one puppet each (capsule squashed to `height`, grapple tether, ragdoll while their `ragdoll` flag is set).
+// Remote players are cosmetic: one pod each (squashed to `height`, floating blade, grapple tether, the same pod tumbling as a ragdoll while their `ragdoll` flag is set).
+// Melee (Kinetic Slash): Left-Click -> stepPlayer starts the swing + magnetic lunge -> 'slash' { dir, speed } goes to the server, which judges it and answers every client
+// with 'hit' / 'killFeed' ('slashFx' shows other players' swings). A hit on YOU applies the knockback; a heavy hit (or a KO) sends your pod tumbling as the ragdoll.
+// HUD: HP bar (bottom centre), hit-marker round the crosshair, kill feed (top right), red vignette when hit.
 // Audio: createAudio() below is a zero-asset Web Audio synth (oscillator sweeps + filtered noise), unlocked by the first click / keypress, [M] mutes.
 // Loads after: everything
 
 import * as THREE from 'three';
 import { io } from 'socket.io-client';
-import { STEP, MAX_STEPS_PER_FRAME, SCALE, RUN, CAM, PUPPET, GRAPPLE, m } from './config.js';
+import { STEP, MAX_STEPS_PER_FRAME, SCALE, RUN, CAM, PUPPET, GRAPPLE, MELEE, MAP, m } from './config.js';
 import DISTRICT_MAP from './game/maps.js';
 import { createWorld, addPlayerCapsule, stepWorld, feetPos, placePlayer, hasFallen } from './physics/world.js';
-import { createPlayerState, stepPlayer, endGrapple, torsoPos } from './physics/player.js';
-import { spawnRagdoll, syncRagdollMeshes, despawnRagdoll } from './physics/ragdoll.js';
+import { createPlayerState, stepPlayer, endGrapple, torsoPos, applyKnockback } from './physics/player.js';
+import { spawnRagdoll, syncRagdollMeshes, despawnRagdoll, ragdollCenter, ragdollVelocity } from './physics/ragdoll.js';
 import { readInput, clearInput } from './input.js';
 import { createScene } from './render/scene.js';
 import { createCameraRig, forwardOf, updateCamera, triggerLandDip } from './render/camera.js';
@@ -97,9 +100,17 @@ function createAudio(toast) {                                   // toast(msg): o
     attach()  { tone('sine', 95, 52, 0.09, 0.30); noise('bandpass', 1800, 900, 2, 0.02, 0.07); },                       // soft low-end magnetic click
     dash()    { noise('bandpass', 500, 3600, 0.9, 0.24, 0.30); tone('sine', 140, 70, 0.10, 0.20); },                    // fast whoosh
     grapple() { noise('bandpass', 900, 4200, 1.1, 0.14, 0.20); tone('sawtooth', 2300, 900, 0.11, 0.09);               // whoosh + metallic thwip
-                tone('square', 3450, 1350, 0.09, 0.04); }
+                tone('square', 3450, 1350, 0.09, 0.04); },
+    // ---- melee. `v` = loudness 0..1 (distance for other players' swings, power for impacts)
+    slash(v)  { noise('bandpass', 700, 5200, 1.0, 0.17, 0.34 * v); noise('highpass', 2600, 7000, 0.7, 0.10, 0.09 * v, 0.02);   // blade whoosh
+                tone('sawtooth', 1900, 420, 0.16, 0.08 * v); tone('sine', 230, 90, 0.12, 0.16 * v); },                          // energy hum + body
+    impact(v) { tone('sine', 190, 42, 0.20, 0.28 + 0.20 * v); noise('lowpass', 2200, 260, 0.8, 0.14, 0.20 + 0.14 * v);           // thud + crack
+                tone('square', 1250, 320, 0.07, 0.06 + 0.05 * v); tone('triangle', 880, 2400, 0.05, 0.05 * v, 0.012); },        // metallic ring
+    hurt(v)   { tone('sine', 120, 38, 0.26, 0.30 * v); noise('lowpass', 1400, 200, 0.7, 0.20, 0.18 * v); tone('sawtooth', 300, 90, 0.18, 0.06 * v); },   // you got hit
+    ko(v)     { tone('sine', 110, 28, 0.60, 0.40 * v); noise('bandpass', 3400, 160, 0.8, 0.50, 0.24 * v);                         // sub boom + falling noise
+                tone('triangle', 660, 140, 0.45, 0.13 * v); tone('sawtooth', 1500, 300, 0.30, 0.06 * v, 0.03); }
   };
-  function play(name) { if (live() && SFX[name]) SFX[name](); }
+  function play(name, vol = 1) { if (live() && SFX[name]) SFX[name](Math.max(0.05, Math.min(1, vol))); }
 
   // per-frame loops. speed in old units / s, `sliding` = grounded slide. Wind starts at 450 and is full at 850 units / s; hiss follows the slide speed.
   function setMotion(speed, sliding) {
@@ -117,7 +128,9 @@ async function boot() {
   // ---- DOM ----------------------------------------------------------------------------------------------------------------------
   const el = { hud: $('hud'), net: $('net'), netWarn: $('netWarn'), toast: $('toast'), resume: $('resume'), xhair: $('crosshair'), gstat: $('grappleStatus'),
                sb: $('scoreboard'), sbRows: $('sbRows'), overlay: $('overlay'), name: $('nameInput'), color: $('colorInput'),
-               play: $('playBtn'), msg: $('overlayMsg') };
+               play: $('playBtn'), msg: $('overlayMsg'),
+               hpBox: $('hpBox'), hpNum: $('hpNum'), koNum: $('koNum'), hpFill: $('hpFill'), hpGhost: $('hpGhost'), slashFill: $('slashFill'),
+               hit: $('hitmarker'), hurt: $('hurt'), feed: $('killFeed') };
   let toastT = 0;
   const toast = (msg, t = 1.6) => { el.toast.textContent = msg; toastT = t; };
 
@@ -135,7 +148,8 @@ async function boot() {
   // YOUR capsule. (Remote players have no capsule: they are puppets only, so only level geometry can be grapple-hooked.)
   const pv = addPlayerCapsule(ctx);
   let me = createPlayerState();
-  function faceCenter(x, z) { me.facing = Math.atan2(-x, -z); rig.yaw = Math.atan2(x, z); rig.pitch = 0.25; }
+  let localYaw = 0;                                         // the yaw your pod is DRAWN with (eased toward facing, or the slash direction during a swing)
+  function faceCenter(x, z) { me.facing = Math.atan2(-x, -z); localYaw = me.facing; rig.yaw = Math.atan2(x, z); rig.pitch = 0.25; }
   placePlayer(pv, lastSpawn.x, lastSpawn.y, lastSpawn.z, false);
   faceCenter(lastSpawn.x, lastSpawn.z);
   stepWorld(ctx);
@@ -143,7 +157,7 @@ async function boot() {
   // ---- net state ----------------------------------------------------------------------------------------------------------------
   const serverUrl = new URLSearchParams(location.search).get('server') || undefined;   // dev: ?server=http://localhost:3000 (needs CORS_ORIGIN there)
   const socket = io(serverUrl, { transports: ['websocket', 'polling'] });
-  let myId = null, myName = '', myColor = 0x5ee6ff, myKo = 0;
+  let myId = null, myName = '', myColor = 0x5ee6ff, myKo = 0, myHp = MELEE.maxHp, myMaxHp = MELEE.maxHp;
   let wantJoin = false, joined = false;
   let ping = 0, clockOffset = 0, bestRtt = Infinity, lastSnapT = 0;     // clockOffset: serverNow - clientNow (ms), see serverNow()
   const serverNow = () => Date.now() + clockOffset;
@@ -155,24 +169,26 @@ async function boot() {
   // ---- local ragdoll + fall / respawn -------------------------------------------------------------------------------------------
   let localRag = null;
   const localTorso = { x: 0, y: 0, z: 0 };
-  let awaiting = false, respawnWait = 0, forceFall = false;           // awaiting = ragdolling, waiting for the server's 'respawn'
+  let awaiting = false, respawnWait = 0, forceFall = false;           // awaiting = ragdolling, waiting for the server's 'respawn' (void fall or KO)
+  let tumbling = false, tumbleT = 0;                                  // tumbling = a heavy (non-lethal) hit sent your pod rolling: a short ragdoll, then you stand up where it stopped
   let fallPos = { x: 0, y: 0, z: 0 }, fallVel = { x: 0, y: 0, z: 0 }, fallYaw = 0;
   let tickN = 0;
 
-  function spawnRag(pos, vel, yaw) {
-    return spawnRagdoll(ctx.RAPIER, ctx.world, pos, vel, { x: vel.x * 0.5, y: 0, z: vel.z * 0.5 }, { yaw, rng: Math.random });
+  function spawnRag(pos, vel, yaw) {                        // the tumbling pod: ONE capsule body (ragdoll.js), launched with `vel`
+    return spawnRagdoll(ctx.RAPIER, ctx.world, pos, vel, null, { yaw, rng: Math.random });
   }
   function killLocalRagdoll() {
     if (localRag) { despawnRagdoll(ctx.world, localRag); localRag = null; }
-    if (localPuppet) { localPuppet.showRagdoll(false); localPuppet.showCapsule(true); }
+    if (localPuppet) localPuppet.setMode('pod');
   }
-  function applyRespawn(sp) {
+  function applyRespawn(sp, hp) {
     killLocalRagdoll();
     lastSpawn = sp;
     placePlayer(pv, sp.x, sp.y || 0, sp.z, false);
     me = createPlayerState();                               // momentum, cooldowns, chains, grapple: all fresh
     faceCenter(sp.x, sp.z);
-    awaiting = false; respawnWait = 0; forceFall = false;
+    awaiting = false; respawnWait = 0; forceFall = false; tumbling = false; tumbleT = 0;
+    setHp(hp === undefined ? myMaxHp : hp);
     clearInput();
     stepWorld(ctx);                                         // one step so the query structures see the new position
     sendState();
@@ -185,25 +201,59 @@ async function boot() {
     if (me.grappleActive) endGrapple(me);
     if (localRag) despawnRagdoll(ctx.world, localRag);
     localRag = spawnRag(fallPos, fallVel, fallYaw);         // brief tumble, cosmetic only
-    awaiting = true; respawnWait = 0; forceFall = false;
+    awaiting = true; respawnWait = 0; forceFall = false; tumbling = false; tumbleT = 0;
     placePlayer(pv, lastSpawn.x, lastSpawn.y || 0, lastSpawn.z, false);   // park the capsule safely; it stays hidden while down
     me = createPlayerState(); me.locked = true; me.facing = fallYaw;
     sendState();                                            // 'ragdoll: true' goes out at once
     if (socket.connected) socket.emit('respawnReq');
   }
 
+  // A hit that is heavy enough (or lethal) turns YOUR pod into the tumbling ragdoll, launched by the knockback (kv, m / s) on top of half your own speed.
+  //  - lethal (KO): like a fall, you wait for the server's 'respawn' (it grants it after MELEE.koRespawnDelay), no 'respawnReq' needed;
+  //  - heavy but alive: `tumbling` for MELEE.tumbleTime, then endTumble() stands the pod up where it came to rest and hands you control again.
+  function startTumble(kv, lethal) {
+    if (awaiting) return;
+    const f = feetPos(pv);
+    fallPos = { x: f.x, y: f.y, z: f.z };
+    fallVel = { x: me.vx * 0.5 + kv.x, y: Math.max(me.vy, 0) * 0.5 + kv.y, z: me.vz * 0.5 + kv.z };
+    fallYaw = me.facing;
+    if (me.grappleActive) endGrapple(me);
+    if (localRag) despawnRagdoll(ctx.world, localRag);
+    localRag = spawnRag(fallPos, fallVel, fallYaw);
+    placePlayer(pv, lastSpawn.x, lastSpawn.y || 0, lastSpawn.z, false);     // park the capsule while the pod tumbles
+    me = createPlayerState(); me.locked = true; me.facing = fallYaw;
+    forceFall = false;
+    if (lethal) { awaiting = true; respawnWait = 0; tumbling = false; tumbleT = 0; }
+    else { tumbling = true; tumbleT = 0; }
+    sendState();                                            // 'ragdoll: true' + the launch velocity: remotes tumble the same pod from here
+  }
+  function endTumble() {
+    const c = ragdollCenter(localRag), v = ragdollVelocity(localRag);
+    killLocalRagdoll();
+    tumbling = false; tumbleT = 0;
+    placePlayer(pv, c.x, c.y - 0.35, c.z, false);           // a pod on its side has its centre 0.35 m up: the feet touch the floor at worst, a standing pod drops the last bit
+    me = createPlayerState();
+    const hs = Math.hypot(v.x, v.z), k = 0.6 * Math.min(1, 14 / Math.max(hs, 1e-6));   // keep a little momentum (60 %, never above 14 m/s)
+    me.vx = v.x * k; me.vz = v.z * k; me.vy = Math.max(-12, Math.min(v.y * 0.6, 8));
+    me.facing = fallYaw; localYaw = fallYaw;
+    clearInput();
+    stepWorld(ctx);                                         // one step so the query structures see the new position
+    sendState();
+  }
+
   // ---- state packet (30 Hz) ----------------------------------------------------------------------------------------------------
   function sendState() {
     if (!joined || !socket.connected) return;
+    const down = awaiting || tumbling;                      // ragdolling: the frozen launch position / velocity goes out (remotes tumble their own copy of the pod from it)
     let x, y, z, vx, vy, vz, yaw, h;
-    if (awaiting) { x = fallPos.x; y = fallPos.y; z = fallPos.z; vx = fallVel.x; vy = fallVel.y; vz = fallVel.z; yaw = fallYaw; h = m(PUPPET.height); }
+    if (down) { x = fallPos.x; y = fallPos.y; z = fallPos.z; vx = fallVel.x; vy = fallVel.y; vz = fallVel.z; yaw = fallYaw; h = m(PUPPET.height); }
     else { const f = feetPos(pv); x = f.x; y = f.y; z = f.z; vx = me.vx; vy = me.vy; vz = me.vz; yaw = me.facing; h = me.height; }
-    const ga = !awaiting && me.grappleActive;
+    const ga = !down && me.grappleActive;
     socket.volatile.emit('state', {
       x: r3(x), y: r3(y), z: r3(z), vx: r3(vx), vy: r3(vy), vz: r3(vz), yaw: r3(yaw), height: r3(h),
-      sliding: !awaiting && !!me.sliding, dashing: !awaiting && me.dashT > 0, wallRunning: !awaiting && !!me.wallRunning,
+      sliding: !down && !!me.sliding, dashing: !down && me.dashT > 0, wallRunning: !down && !!me.wallRunning,
       grappleActive: ga, grappleAnchor: ga ? { x: r3(me.grappleAnchor.x), y: r3(me.grappleAnchor.y), z: r3(me.grappleAnchor.z) } : null,
-      ragdoll: awaiting,
+      ragdoll: down,
     });
   }
 
@@ -223,7 +273,9 @@ async function boot() {
       tgt: { x: p.x, y: p.y, z: p.z, yaw: p.yaw, height: p.height || m(PUPPET.height) },
       vel: { x: 0, y: 0, z: 0 }, grappleActive: false, anchor: null, ragdoll: false, rag: null,
       torso: { x: 0, y: 0, z: 0 }, tp: { x: 0, y: 0, z: 0 },
+      hp: p.hp === undefined ? MELEE.maxHp : p.hp, dead: !!p.dead, attackT: 0, attackYaw: 0,        // attackT / attackYaw: their slash swing ('slashFx')
     };
+    r.puppet.setMode('pod'); r.puppet.setAttack(-1);
     remotes.set(p.id, r);
     applyRemote(r, p);
   }
@@ -234,7 +286,7 @@ async function boot() {
     const r = remotes.get(id);
     if (!r) return;
     killRemoteRag(r);
-    r.puppet.showRagdoll(false); r.puppet.showCapsule(false);
+    r.puppet.setAttack(-1); r.puppet.setMode('hidden');
     if (!puppetPool.has(r.color)) puppetPool.set(r.color, []);
     puppetPool.get(r.color).push(r.puppet);
     if (r.slot > 0) { view.setGrapple(r.slot, null); slotUsed[r.slot] = false; }
@@ -249,9 +301,11 @@ async function boot() {
     r.grappleActive = !!d.grappleActive; r.anchor = d.grappleAnchor || null;
     if (d.ko !== undefined) r.ko = d.ko | 0;
     if (d.ping !== undefined) r.ping = d.ping | 0;
+    if (d.hp !== undefined) r.hp = d.hp;
+    if (d.dead !== undefined) r.dead = !!d.dead;
     const flag = !!d.ragdoll;
     if (flag && !r.ragdoll) {                               // just fell: tumble where they fell
-      r.ragdoll = true;
+      r.ragdoll = true; r.attackT = 0;
       Object.assign(r.cur, t);
       killRemoteRag(r);
       r.rag = spawnRag({ x: t.x, y: t.y, z: t.z }, { x: r.vel.x, y: Math.min(r.vel.y, 0), z: r.vel.z }, t.yaw);
@@ -262,7 +316,7 @@ async function boot() {
     }
   }
 
-  function updateRemote(r, k) {
+  function updateRemote(r, k, dt) {
     const c = r.cur, t = r.tgt, dx = t.x - c.x, dy = t.y - c.y, dz = t.z - c.z;
     if (dx * dx + dy * dy + dz * dz > SNAP_DIST * SNAP_DIST) { c.x = t.x; c.y = t.y; c.z = t.z; c.yaw = t.yaw; c.height = t.height; }
     else {
@@ -271,11 +325,14 @@ async function boot() {
       c.height += (t.height - c.height) * k;
     }
     const pu = r.puppet;
-    if (r.rag) { syncRagdollMeshes(r.rag, pu.parts, r.torso); pu.showRagdoll(true); pu.showCapsule(false); }
+    if (r.attackT > 0) r.attackT = Math.max(0, r.attackT - dt);
+    if (r.rag) { syncRagdollMeshes(r.rag, pu.pod, r.torso); pu.setMode('ragdoll'); pu.setAttack(-1); }      // the SAME pod, now driven by the physics body
     else {
+      pu.setMode('pod');
       pu.setFeet(c.x, c.y, c.z); pu.setHeight(c.height);
-      if (pu.setYaw) pu.setYaw(c.yaw);
-      pu.showRagdoll(false); pu.showCapsule(true);
+      if (r.attackT > 0) c.yaw += angDiff(c.yaw, r.attackYaw) * (1 - Math.exp(-40 * dt));       // face the slash direction while the blade sweeps
+      pu.setYaw(c.yaw);
+      pu.setAttack(r.attackT > 0 ? Math.min(0.999, 1 - r.attackT / MELEE.attackTime) : -1);
     }
     if (r.slot > 0) {                                       // floating grapple tether
       if (r.grappleActive && r.anchor && !r.rag) {
@@ -315,15 +372,15 @@ async function boot() {
     wantJoin = false; clearTimeout(joinTimer);
     el.play.disabled = false; el.play.textContent = 'PLAY'; setMsg('Room is full (' + max + ' players).');
   });
-  socket.on('init', ({ id, spawn, players, serverTime }) => {
+  socket.on('init', ({ id, spawn, players, serverTime, hp, maxHp }) => {
     clearTimeout(joinTimer);
-    myId = id;
+    myId = id; myMaxHp = maxHp || MELEE.maxHp;
     clockOffset = serverTime - Date.now();                             // rough until the timeSync samples refine it
     clearRemotes();
     for (const p of players) if (p.id !== id) addRemote(p);
     if (!localPuppet) localPuppet = view.addPuppet(myColor);
     joined = true; lastSnapT = 0; myKo = 0;
-    applyRespawn(spawn);
+    applyRespawn(spawn, hp === undefined ? myMaxHp : hp);
     el.overlay.style.display = 'none'; setMsg('');
     clearInput(true);
     toast('Welcome, ' + myName + '!', 2);
@@ -338,12 +395,67 @@ async function boot() {
     if (s.t && s.t < lastSnapT) return;                                // drop out-of-order snapshots
     if (s.t) lastSnapT = s.t;
     for (const d of s.players) {
-      if (d.id === myId) { myKo = d.ko | 0; continue; }
+      if (d.id === myId) { myKo = d.ko | 0; if (typeof d.hp === 'number') myHp = d.hp; if (d.maxHp) myMaxHp = d.maxHp; continue; }
       const r = remotes.get(d.id);
       if (r) applyRemote(r, d);
     }
   });
-  socket.on('respawn', ({ spawn }) => { if (joined && awaiting) applyRespawn(spawn); });
+  socket.on('respawn', ({ spawn, hp }) => { if (joined && (awaiting || tumbling)) applyRespawn(spawn, hp); });
+
+  // ---- melee events from the server ----------------------------------------------------------------------------------------------
+  const soundVol = (pos) => { const f = feetPos(pv); return Math.max(0.08, 1 - Math.hypot(pos.x - f.x, pos.z - f.z) / 40); };   // other players' sounds fade with distance (40 m)
+  function popHitmarker(kill) {                             // restart the CSS pop on the crosshair ticks (gold + bigger on a KO)
+    const h = el.hit; h.classList.remove('show'); h.classList.toggle('kill', !!kill); void h.offsetWidth; h.classList.add('show');
+  }
+  function flashHurt() {
+    el.hurt.classList.remove('show'); void el.hurt.offsetWidth; el.hurt.classList.add('show');
+    el.hpBox.classList.remove('hit'); void el.hpBox.offsetWidth; el.hpBox.classList.add('hit');
+  }
+  function addFeed(k) {
+    const row = document.createElement('div');
+    row.className = 'kf' + (k.killerId === myId || k.victimId === myId ? ' me' : '') + (k.cause === 'void' ? ' void' : '');
+    const who = (name, color) => {
+      const nm = document.createElement('span'); nm.className = 'nm';
+      const sw = document.createElement('span'); sw.className = 'sw'; sw.style.background = '#' + (color >>> 0).toString(16).padStart(6, '0');
+      const t = document.createElement('span'); t.textContent = name;
+      nm.append(sw, t); return nm;
+    };
+    const ic = document.createElement('span'); ic.className = 'ic'; ic.textContent = k.cause === 'void' ? 'VOID' : 'SLASH';
+    row.append(who(k.killerName, k.killerColor), ic, who(k.victimName, k.victimColor));
+    el.feed.prepend(row);
+    while (el.feed.children.length > 5) el.feed.lastChild.remove();
+    setTimeout(() => row.remove(), 5600);
+  }
+  socket.on('slashFx', ({ id, yaw }) => {                   // somebody else swung (hit or miss): blade sweep + whoosh
+    const r = remotes.get(id);
+    if (!joined || !r || r.rag) return;
+    r.attackT = MELEE.attackTime; r.attackYaw = yaw;
+    audio.play('slash', soundVol(r.cur) * 0.8);
+  });
+  socket.on('hit', ({ attackerId, targetId, damage, knockVec, kill, hp }) => {
+    if (!joined) return;
+    const power = Math.min(1, damage / MELEE.maxDmg);
+    if (targetId === myId) {
+      setHp(hp); flashHurt(); audio.play('hurt', 0.55 + 0.45 * power);
+      if (!awaiting && !tumbling) {
+        const heavy = Math.hypot(knockVec.x, knockVec.z) >= m(MELEE.tumbleKnock);
+        if (kill || heavy) startTumble(knockVec, kill);                  // heavy hit / KO: the pod tumbles
+        else applyKnockback(me, knockVec.x, knockVec.y, knockVec.z);     // light hit: a stagger + knockback under normal gravity
+      }
+    } else {
+      const r = remotes.get(targetId);
+      if (r) { r.hp = hp; r.puppet.flash(0.6 + 0.4 * power); }
+    }
+    if (attackerId === myId) { popHitmarker(kill); audio.play('impact', power); }
+    else if (targetId !== myId) { const r = remotes.get(targetId); audio.play('impact', (r ? soundVol(r.cur) : 0.3) * power); }
+  });
+  socket.on('killFeed', (k) => {
+    if (!joined) return;
+    addFeed(k);
+    audio.play('ko', k.killerId === myId || k.victimId === myId ? 1 : 0.4);
+    if (k.killerId === myId) { if (k.cause === 'void') popHitmarker(true); toast('KO  +1   ' + k.victimName, 1.4); }
+  });
+  function setHp(h) { myHp = Math.max(0, Math.min(myMaxHp, Number(h) || 0)); }
 
   // ---- join overlay ----------------------------------------------------------------------------------------------------------------
   try { el.name.value = localStorage.getItem('pf3d.name') || ''; } catch (e) { /* storage blocked */ }
@@ -373,7 +485,7 @@ async function boot() {
   window.addEventListener('keydown', (e) => {
     if (typingTarget(e)) return;
     if (e.code === 'Tab') { e.preventDefault(); if (joined) showBoard = true; }
-    if (e.code === 'KeyR' && !e.repeat && joined && !awaiting) forceFall = true;       // "I am stuck": handled exactly like a fall
+    if (e.code === 'KeyR' && !e.repeat && joined && !awaiting && !tumbling) forceFall = true;       // "I am stuck": handled exactly like a fall
   });
   window.addEventListener('keyup', (e) => { if (e.code === 'Tab') showBoard = false; });
   window.addEventListener('blur', () => { showBoard = false; });
@@ -385,22 +497,45 @@ async function boot() {
     return { origin: { x: _eye.x, y: _eye.y, z: _eye.z }, dir: { x: _look.x, y: _look.y, z: _look.z }, owner: 0, skip: () => false };
   }
 
+  // ---- melee aim: the camera look direction flattened to the ground (what the crosshair points at), plus the opponents the magnetic lunge may lock onto (their visible
+  // feet positions; KO'd / tumbling pods are skipped). player.js picks the nearest one inside the cleave cone.
+  function meleeAim() {
+    view.camera.getWorldDirection(_look);
+    let dx = _look.x, dz = _look.z;
+    if (Math.hypot(dx, dz) < 0.12) { dx = Math.sin(me.facing); dz = Math.cos(me.facing); }       // looking straight up / down: use the facing
+    const targets = [];
+    for (const r of remotes.values()) if (!r.rag && !r.ragdoll && !r.dead) targets.push(r.cur);
+    return { dirX: dx, dirZ: dz, targets };
+  }
+
   // ---- one fixed simulation tick (your player only) ----------------------------------------------------------------------------------
   function tick() {
     if (!joined) return;
-    me.locked = awaiting;                                   // ragdolling: skip input (the latches still drain below)
+    const down = awaiting || tumbling;
+    me.locked = down;                                       // ragdolling: skip input (the latches still drain below)
     const snap = readInput(forwardOf(rig));
-    if (snap.grapple && !awaiting) snap.aim = aimFromCamera();
+    if (snap.grapple && !down) snap.aim = aimFromCamera();
+    if (snap.attack && !down) snap.melee = meleeAim();
     const wasOnGround = pv.player.grounded;
     stepPlayer(me, snap, pv);
     for (const e of me.sfx) audio.play(e);
-    if (!awaiting && !wasOnGround && pv.player.grounded && me.vy < 0) triggerLandDip(rig, me.vy);   // me.vy is still the touchdown speed here
+    if (me.slashEvt) {                                      // the swing started: ask the server to judge it (it owns cooldown, cone, reach, damage)
+      const e = me.slashEvt; me.slashEvt = null;
+      if (socket.connected) socket.emit('slash', { dir: { x: r3(e.dirX), z: r3(e.dirZ) }, speed: Math.round(e.speed) });
+    }
+    if (!down && !wasOnGround && pv.player.grounded && me.vy < 0) triggerLandDip(rig, me.vy);   // me.vy is still the touchdown speed here
 
     stepWorld(ctx);
 
     if (awaiting) {
       respawnWait += STEP;
       if (respawnWait > RESPAWN_FALLBACK) applyRespawn(lastSpawn);     // server silent (offline?): respawn on our own
+    } else if (tumbling) {
+      tumbleT += STEP;
+      if (ragdollCenter(localRag).y < m(MAP.fallY)) {                  // blasted off the roof: that is a fall (the server credits the last attacker)
+        tumbling = false; awaiting = true; respawnWait = 0;
+        if (socket.connected) socket.emit('respawnReq');
+      } else if (tumbleT >= MELEE.tumbleTime) endTumble();             // the pod has bounced for long enough: stand up where it came to rest
     } else if (hasFallen(pv) || forceFall) startFall();               // hasFallen = feet below MAP.fallY
 
     if ((++tickN) % SEND_EVERY === 0) sendState();
@@ -444,7 +579,21 @@ async function boot() {
       '  AIRJ ' + hs.airJumpsLeft +
       '  GRAPPLE ' + (hs.grappleActive ? 'GO' : hs.grappleCd > 0 ? hs.grappleCd.toFixed(1) + 's' : 'ready') +
       (hs.wallRunning ? '  WALLRUN' : hs.regrabTimer > 0 ? '  regrab ' + hs.regrabTimer.toFixed(2) + 's' : '') +
-      (hs.sliding ? '  SLIDE' : '') + (hs.slideBoostCd > 0 ? '  slideboost ' + hs.slideBoostCd.toFixed(2) + 's' : '  slideboost ready');
+      (hs.sliding ? '  SLIDE' : '') + (hs.slideBoostCd > 0 ? '  slideboost ' + hs.slideBoostCd.toFixed(2) + 's' : '  slideboost ready') +
+      '  SLASH ' + (hs.attackCd > 0 ? hs.attackCd.toFixed(2) + 's' : 'ready');
+
+    // HP bar (bottom centre): the fill snaps down at once, the pale ghost trails behind (CSS transition); colour steps cyan -> amber -> coral
+    el.hpBox.style.display = joined ? 'block' : 'none';
+    if (joined) {
+      const f = Math.max(0, Math.min(1, myHp / myMaxHp)), txt = String(Math.ceil(myHp - 1e-6));
+      if (txt !== el.hpNum.textContent) {
+        el.hpNum.textContent = txt;
+        el.hpFill.style.transform = el.hpGhost.style.transform = 'scaleX(' + f.toFixed(3) + ')';
+        el.hpBox.classList.toggle('mid', f <= 0.6 && f > 0.3); el.hpBox.classList.toggle('low', f <= 0.3);
+      }
+      const ko = 'KO ' + myKo; if (el.koNum.textContent !== ko) el.koNum.textContent = ko;
+      el.slashFill.style.transform = 'scaleX(' + (1 - Math.max(0, Math.min(1, hs.attackCd / MELEE.cooldown))).toFixed(3) + ')';   // slash cooldown line fills while the blade recharges
+    }
 
     const gtxt = !joined ? '' : hs.grappleActive ? 'HOOKED' : hs.grappleCd > 0 ? 'GRAPPLE ' + hs.grappleCd.toFixed(1) + 's' : 'GRAPPLE READY';
     if (gtxt !== xhairText) {
@@ -463,16 +612,26 @@ async function boot() {
     while (acc >= STEP && n < MAX_STEPS_PER_FRAME) { tick(); acc -= STEP; n++; }
     if (n >= MAX_STEPS_PER_FRAME) acc = 0;
 
-    // your puppet: ragdoll while down, otherwise the capsule squashed to the collider height
+    // your pod: the tumbling ragdoll while down (the same pod mesh, driven by the physics body), otherwise standing on the capsule, squashed to the collider height,
+    // facing the slash direction during a swing (the blade sweep is interpolated between sim ticks with the accumulator `acc`)
     if (joined && localPuppet) {
-      if (localRag) { syncRagdollMeshes(localRag, localPuppet.parts, localTorso); localPuppet.showRagdoll(true); localPuppet.showCapsule(false); }
-      else { const f = feetPos(pv); localPuppet.setFeet(f.x, f.y, f.z); localPuppet.setHeight(me.height); localPuppet.showRagdoll(false); localPuppet.showCapsule(!awaiting); }
+      if (localRag) { syncRagdollMeshes(localRag, localPuppet.pod, localTorso); localPuppet.setMode('ragdoll'); localPuppet.setAttack(-1); }
+      else if (awaiting) { localPuppet.setMode('hidden'); localPuppet.setAttack(-1); }
+      else {
+        const f = feetPos(pv), swinging = me.attackT > 0;
+        localPuppet.setMode('pod');
+        localPuppet.setFeet(f.x, f.y, f.z); localPuppet.setHeight(me.height);
+        localYaw += angDiff(localYaw, swinging ? me.attackYaw : me.facing) * (1 - Math.exp(-(swinging ? 40 : 14) * dt));
+        localPuppet.setYaw(localYaw);
+        localPuppet.setAttack(swinging ? Math.min(0.999, (MELEE.attackTime - me.attackT + acc) / MELEE.attackTime) : -1);
+      }
       if (me.grappleActive && !awaiting) view.setGrapple(0, torsoPos(pv, me), me.grappleAnchor); else view.setGrapple(0, null);
     }
 
     // everybody else: exponential smoothing toward the latest snapshot
     const k = 1 - Math.exp(-SMOOTH * dt);
-    for (const r of remotes.values()) updateRemote(r, k);
+    for (const r of remotes.values()) updateRemote(r, k, dt);
+    view.update(dt);                                        // floating blades, slash trails, hit flashes
 
     // chase camera: your capsule, or your tumbling torso while you are down
     const hv = pv, hSpeed = Math.hypot(me.vx, me.vz);

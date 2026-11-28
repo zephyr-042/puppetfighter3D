@@ -134,6 +134,36 @@ export const MANTLE = {
   window: 0.18,        // s after the last probe hit during which the mantle continues (forward step, keep-climbing, speed kept)
 };
 
+// ---- melee: Kinetic Slash (Left-Click). The floating energy blade cleaves a forward cone; a magnetic lunge snaps you onto the target and hands your momentum back.
+// The SERVER judges every hit (server.js imports this block) using the numbers below, so client and server can never disagree on reach / damage.
+// Damage and knockback scale LINEARLY with the horizontal speed you bring into the swing (dmgSpeedMin -> dmgSpeedMax), so a b-hop / wall-run / grapple slash hits hardest.
+export const MELEE = {
+  reach: 180,          // old units (4.5 m): forward reach of the cleave (measured to the target's capsule axis, + radiusPad on the server)
+  coneCos: 0.65,       // cosine of the half-angle of the cleave cone (~50 degrees each side): generous, the lunge does the rest
+  cooldown: 0.55,      // s between slashes (client gate + server gate)
+  attackTime: 0.22,    // s the blade swing lasts (player state `attackT`, drives the 140 degree sweep + crescent trail in scene.js)
+  baseDmg: 35,         // damage of a slash at (or below) dmgSpeedMin
+  maxDmg: 75,          // damage of a slash at (or above) dmgSpeedMax
+  dmgSpeedMin: 300,    // units / s: horizontal speed where the damage / knockback scaling starts
+  dmgSpeedMax: 760,    // units / s: horizontal speed where it is at full strength (= the soft MAX_FLOW_SPEED ceiling in player.js)
+  baseKnock: 420,      // units / s of knockback at dmgSpeedMin (horizontal, along the slash direction)
+  maxKnock: 880,       // units / s of knockback at dmgSpeedMax: blasts opponents off the roof
+  knockUp: 0.3,        // upward launch = knockUp * horizontal knockback, so a victim leaves the floor (no ground friction) and carries
+  lungeSpeed: 560,     // units / s: magnetic lunge speed (never lowers a faster speed)
+  lungeDuration: 0.14, // s the lunge lasts (shortened so you stop standOff short of a locked target)
+  standOff: 36,        // old units (0.9 m): a magnetic lunge stops this far from the target it locked, so you never overshoot through them
+  hitStun: 0.25,       // s a victim cannot steer after any hit (knockback plays out under normal gravity)
+  tumbleKnock: 640,    // units / s: a hit with at least this knockback sends the victim's pod tumbling (ragdoll) instead of just a stagger
+  tumbleTime: 0.85,    // s the (non-lethal) tumble lasts before the pod stands back up where it came to rest, keeping a little momentum
+  koRespawnDelay: 2000,// ms (server): a KO'd pod tumbles this long before the server grants a clean spawn
+  voidCredit: 4,       // s (server): a player who falls into the void (respawnReq) this soon after being hit credits the last attacker with the KO
+  maxHp: 100,          // hit points of every pod
+  regenDelay: 4,       // s (server) without taking damage before hit points come back
+  regenRate: 8,        // hit points / s (server) once regeneration has started
+  radiusPad: 14,       // old units (0.35 m, the pod radius): server adds this to `reach` because it measures to the capsule axis
+  vertical: 88,        // old units (2.2 m): max vertical distance between the two capsule centres for a slash to connect
+};
+
 // ---- movement
 export const MOVE = {
   accel: 9,            // how fast velocity chases the wanted velocity (old: k = dt * 9)

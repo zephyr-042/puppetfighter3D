@@ -1,18 +1,19 @@
 // src/render/scene.js
 // RENDER (1/2): the Three.js renderer, lights, the District map (floor slabs with rim trims, boxes, pillars, ramp wedges),
-// and one puppet per player: a faceless satin-dark armour capsule with emissive energy-core rings (squashes while sliding) plus a hidden
-// 6-part ragdoll mesh set that matches RAGDOLL_RIG, the red "IT" cone marker and the glowing grapple tether (setGrapple).
+// and one puppet per player: a SINGLE armoured pod (satin-dark capsule, emissive chest + visor rings, squashes while sliding) with a floating
+// energy blade hovering off its right side that sweeps a 140 degree slash with a glowing crescent trail while `attackP` runs (setAttack). The pod is
+// also the ragdoll: when the pod tumbles, physics/ragdoll.js drives this very same `pod` group (one rigid capsule, no limbs), so nothing ever shape-shifts.
+// Also the red "IT" cone marker and the glowing grapple tether (setGrapple).
 // LOOK: sleek cinematic cyber-dusk (Mirror's Edge Catalyst / Ghostrunner / Titanfall 2). A low amber sun, a midnight-to-sunset sky gradient, dark
 // architectural materials and "runner vision" emissive accents (cyan wall-run strips, amber billboard faces, gold pad / speed-ramp edges, beacon rings
 // on towers and pillars). No background geometry at all (no skyline, facade or street): just the dusk sky gradient and a slate horizon fog.
 // Meshes are built from the same map data and helpers (game/maps.js) as the physics colliders, so they always match.
 // Accent strips are collected into a handful of InstancedMesh batches (one draw call per colour / shape, no shadows) to keep District at 60+ FPS.
-// Loads after: config.js, game/maps.js, physics/ragdoll.js (RAGDOLL_RIG dimensions only)
+// Loads after: config.js, game/maps.js
 
 import * as THREE from 'three';
 import { m, PUPPET, CAM, MAP } from '../config.js';
 import DISTRICT_MAP, { PALETTE, floorSlabs, rampSpan, boxSpan } from '../game/maps.js';
-import { RAGDOLL_RIG } from '../physics/ragdoll.js';
 
 // ---- look tuning (everything the dusk mood depends on lives here) -------------------------------------------------------------
 const TRIM_COLOR = 0x8d99ae, TILE_M = 5;                                   // silver-grey coping trim; floor grid tile (metres): gives a sense of speed
@@ -86,80 +87,190 @@ export function buildRampGeometry(r) {
 }
 
 // ---- puppets ---------------------------------------------------------------------------------------------------------------
-// Geometry is shared by every puppet; each puppet owns two materials: satin-dark armour tinted with the player colour, and an emissive
-// "energy core" in the pure player colour (chest + shoulder rings on the capsule, a chest band + shoulder caps on the ragdoll).
-// Everything is faceless by design, and the rings are rotation-symmetric, so the capsule needs no facing.
-const ARMOR_DARKEN = 0.5, CORE_EMISSIVE = 0.65;
-const DARK_STEEL = new THREE.Color(0x10141b);
-let capsuleGeo = null, ragGeo = null, ringGeo = null;
+// ONE armoured pod per player. Geometry is shared by every puppet; each puppet owns five materials: satin-dark armour tinted with the player colour,
+// an emissive "energy core" in the pure player colour (chest + visor rings), the glowing blade, its white-hot edge, and the additive slash trail.
+// Hierarchy:  pod (origin = pod CENTRE; position / quaternion driven by setFeet + setYaw, or by ragdoll.js while tumbling)
+//               └ mount (origin = FEET: y = -height / 2)  ├ body capsule, chest ring, visor ring   ├ bladeRig (hilt + blade + edge)   └ trail crescent
+// Pod-local axes: +Z = the way the pod faces, -X = its right side. The faceless capsule and its rings are rotation-symmetric; only the blade shows the facing.
+const ARMOR_DARKEN = 0.5, CORE_EMISSIVE = 0.65, BLADE_EMISSIVE = 2.2, FLASH_TIME = 0.18;
+const DARK_STEEL = new THREE.Color(0x10141b), WHITE = new THREE.Color(0xffffff), Y_AXIS = new THREE.Vector3(0, 1, 0);
+
+// Floating energy blade (metres, mount / feet space). The hilt hovers at `pivot` = off the RIGHT side (x -0.55), shoulder height (y 1.05), slightly forward (z 0.2).
+// Idle: tilted up and a little outward, with a slow bob. Slash: the hilt orbits the pod's vertical axis (radius = hypot(pivot.x, pivot.z)) through a 140 degree
+// arc, right -> left across the front, blade pointing radially outward; the arc STARTS exactly at the idle pivot, so the wind-up never jumps.
+const BLADE = { len: 1.5, back: 0.22, half: 0.065, thick: 0.035, pivot: [-0.55, 1.05, 0.2], idlePitch: -1.0, idleYaw: -0.25 };
+const ORBIT_R = Math.hypot(BLADE.pivot[0], BLADE.pivot[2]);
+const ARC_HALF = THREE.MathUtils.degToRad(70);                           // 2 x 70 = the 140 degree slash arc
+// slash timeline over attackP in 0..1 (attackP = 1 - attackT / MELEE.attackTime): wind-up, sweep, recovery
+const SLASH = { p0: 0.12, p1: 0.62, trailSegs: 28, trailOut: ORBIT_R + BLADE.len, trailMax: 1.1, trailMin: 0.1, trailTail: 0.7, trailFade: 0.25 };
+
+const sstep = (a, b, x) => { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+
+let capsuleGeo = null, ringGeo = null, bladeGeo = null;
+function bladeShape(lenK, halfK) {                                       // blade silhouette in the (length, width) plane: a long lens with a pointed tip
+  const L = BLADE.len * lenK, w = BLADE.half * halfK, sh = new THREE.Shape();
+  sh.moveTo(-BLADE.back, -w * 0.55); sh.lineTo(L * 0.78, -w); sh.lineTo(L, 0); sh.lineTo(L * 0.78, w); sh.lineTo(-BLADE.back, w * 0.55); sh.closePath();
+  return sh;
+}
+function extrudeBlade(shape, thick) {                                    // thickness across X, length along +Z, width along Y
+  const g = new THREE.ExtrudeGeometry(shape, { depth: thick, bevelEnabled: false });
+  g.translate(0, 0, -thick / 2);
+  g.rotateY(-Math.PI / 2);                                               // (x, y, z) -> (-z, y, x): length x becomes +Z, thickness z becomes X
+  return g;
+}
 function getGeos() {
   if (!capsuleGeo) {
-    const radius = m(PUPPET.radius), total = m(PUPPET.height), R = RAGDOLL_RIG;
+    const radius = m(PUPPET.radius), total = m(PUPPET.height);
     capsuleGeo = new THREE.CapsuleGeometry(radius, total - 2 * radius, 6, 14);
     ringGeo = {
       chest: new THREE.TorusGeometry(radius + 0.005, 0.032, 8, 28).rotateX(Math.PI / 2),
-      shoulder: new THREE.TorusGeometry(radius + 0.005, 0.02, 8, 28).rotateX(Math.PI / 2)
+      visor: new THREE.TorusGeometry(radius + 0.005, 0.02, 8, 28).rotateX(Math.PI / 2)
     };
-    ragGeo = {
-      torso: new THREE.BoxGeometry(R.torso.hx * 2, R.torso.hy * 2, R.torso.hz * 2),
-      head: new THREE.SphereGeometry(R.head.r, 14, 10),
-      arm: new THREE.CapsuleGeometry(R.arm.r, R.arm.hh * 2, 4, 8),
-      leg: new THREE.CapsuleGeometry(R.leg.r, R.leg.hh * 2, 4, 8),
-      coreBand: new THREE.BoxGeometry(R.torso.hx * 2 + 0.03, R.torso.hy * 0.45, R.torso.hz * 2 + 0.03),
-      shoulderCap: new THREE.SphereGeometry(R.arm.r * 1.15, 10, 8)
+    bladeGeo = {
+      blade: extrudeBlade(bladeShape(1, 1), BLADE.thick),
+      edge: extrudeBlade(bladeShape(0.96, 0.3), BLADE.thick * 1.7),      // white-hot core line, a touch thicker so it shows through both faces
+      hilt: new THREE.CylinderGeometry(0.05, 0.065, 0.26, 12).rotateX(Math.PI / 2).translate(0, 0, -BLADE.back + 0.02),
+      guard: new THREE.TorusGeometry(0.1, 0.018, 8, 22).translate(0, 0, 0.03)
     };
   }
-  return { capsuleGeo, ragGeo, ringGeo };
+  return { capsuleGeo, ringGeo, bladeGeo };
 }
 
-// One puppet: `capsule` (origin = feet) for normal play and `parts` (6 meshes with origin at the body centre, positioned in WORLD
-// space by ragdoll.js syncRagdollMeshes) for the on-demand ragdoll. Only one of the two is visible at a time.
+// Crescent slash trail: one flat ribbon in the horizontal plane, tapering to points at both ends. The vertex colours carry the player's colour and a per-vertex
+// ALPHA that update() rewrites while a swing runs, so the crescent is "drawn" behind the blade and fades out. Outer edge bright, inner edge soft.
+function makeTrail(color) {
+  const n = SLASH.trailSegs, pos = new Float32Array((n + 1) * 2 * 3), col = new Float32Array((n + 1) * 2 * 4), idx = [];
+  for (let i = 0; i <= n; i++) {
+    const u = i / n, th = ARC_HALF - 2 * ARC_HALF * u;                    // u = 0 right end of the arc, u = 1 left end (the blade sweeps right -> left)
+    const w = SLASH.trailMin + (SLASH.trailMax - SLASH.trailMin) * Math.pow(Math.sin(Math.PI * u), 0.8);
+    const sx = -Math.sin(th), sz = Math.cos(th), ro = SLASH.trailOut, ri = ro - w;
+    pos.set([sx * ro, 0, sz * ro, sx * ri, 0, sz * ri], i * 6);
+    for (let k = 0; k < 2; k++) col.set([color.r, color.g, color.b, 0], (i * 2 + k) * 4);
+    if (i < n) { const a = i * 2; idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2); }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setAttribute('color', new THREE.BufferAttribute(col, 4));
+  g.setIndex(idx);
+  return g;
+}
+
+// One puppet = one pod. API (all metres / radians):
+//   setFeet(x, y, z), setHeight(h) (slide squash), setYaw(a)         - normal play (pod stands on its feet, `pod` follows)
+//   setMode('pod' | 'ragdoll' | 'hidden')                              - 'ragdoll': ragdoll.js drives `pod` (syncRagdollMeshes(rag, puppet.pod, out)); setFeet / setYaw are then not called
+//   setAttack(p)  p in 0..1 = swing progress (1 - attackT / MELEE.attackTime), -1 = no swing;   flash(power)  hit flash;   update(dt)  called by view.update(dt)
 function createPuppet(scene, color) {
-  const { capsuleGeo, ragGeo, ringGeo } = getGeos();
-  const total = m(PUPPET.height), radius = m(PUPPET.radius), cyl = Math.max(total - 2 * radius, 0), R = RAGDOLL_RIG;
+  const { capsuleGeo, ringGeo, bladeGeo } = getGeos();
+  const total = m(PUPPET.height), radius = m(PUPPET.radius), cyl = Math.max(total - 2 * radius, 0);
   const base = new THREE.Color(color);
   const armor = new THREE.MeshStandardMaterial({ color: base.clone().lerp(DARK_STEEL, ARMOR_DARKEN), roughness: 0.35, metalness: 0.25 });
   const core = new THREE.MeshStandardMaterial({ color: base, emissive: base, emissiveIntensity: CORE_EMISSIVE, roughness: 0.3, metalness: 0.1 });
+  const bladeMat = new THREE.MeshStandardMaterial({ color: base.clone().multiplyScalar(0.3), emissive: base, emissiveIntensity: BLADE_EMISSIVE, roughness: 0.3, metalness: 0.1 });
+  const edgeMat = new THREE.MeshBasicMaterial({ color: base.clone().lerp(WHITE, 0.8), toneMapped: false });
+  const trailMat = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, toneMapped: false, fog: false });
 
-  const capsule = new THREE.Group();
+  const pod = new THREE.Group(), mount = new THREE.Group();
+  pod.add(mount);
   const body = new THREE.Mesh(capsuleGeo, armor);
   body.position.y = total / 2;
   body.castShadow = true;
-  capsule.add(body);
-  const chest = new THREE.Mesh(ringGeo.chest, core), shoulder = new THREE.Mesh(ringGeo.shoulder, core);   // energy core: lit in the dark, readable in shadow
-  capsule.add(chest); capsule.add(shoulder);
-  scene.add(capsule);
+  mount.add(body);
+  const chest = new THREE.Mesh(ringGeo.chest, core), visor = new THREE.Mesh(ringGeo.visor, core);   // energy core + visor ring: lit in the dark, readable in shadow
+  mount.add(chest); mount.add(visor);
 
-  const ragGroup = new THREE.Group();
-  const part = (geo) => { const mesh = new THREE.Mesh(geo, armor); mesh.castShadow = true; ragGroup.add(mesh); return mesh; };
-  const parts = {
-    torso: part(ragGeo.torso), head: part(ragGeo.head),
-    armL: part(ragGeo.arm), armR: part(ragGeo.arm),
-    legL: part(ragGeo.leg), legR: part(ragGeo.leg)
-  };
-  // ragdoll energy core: children follow their part, so syncRagdollMeshes needs no change
-  const band = new THREE.Mesh(ragGeo.coreBand, core); band.position.y = R.torso.hy * 0.35; parts.torso.add(band);
-  for (const arm of [parts.armL, parts.armR]) { const cap = new THREE.Mesh(ragGeo.shoulderCap, core); cap.position.y = R.arm.hh * 0.9; arm.add(cap); }
-  ragGroup.visible = false;
-  scene.add(ragGroup);
+  // floating energy blade: hilt + guard ring (dark steel / core), blade body (emissive) and a white-hot edge. Nothing holds it: it hovers.
+  const bladeRig = new THREE.Group();
+  bladeRig.add(new THREE.Mesh(bladeGeo.hilt, armor));
+  bladeRig.add(new THREE.Mesh(bladeGeo.guard, core));
+  bladeRig.add(new THREE.Mesh(bladeGeo.blade, bladeMat));
+  bladeRig.add(new THREE.Mesh(bladeGeo.edge, edgeMat));
+  mount.add(bladeRig);
 
-  // rings sit on the straight part of the capsule (chest low, shoulders high) and follow the squash, so a slide pulls them down with the body
+  const tc = base.clone().lerp(WHITE, 0.4);
+  const trailGeo = makeTrail(tc), trailCol = trailGeo.getAttribute('color'), trail = new THREE.Mesh(trailGeo, trailMat);
+  trail.visible = false; trail.frustumCulled = false; trail.renderOrder = 2;
+  mount.add(trail);
+  scene.add(pod);
+
+  let fx = 0, fy = 0, fz = 0, curH = total, yaw = 0, mode = 'pod', attackP = -1, flashT = 0, flashPow = 1, t = Math.random() * 10;
+  const phase = Math.random() * 6.28;
+  const place = () => pod.position.set(fx, fy + curH / 2, fz);
+
+  // rings sit on the straight part of the capsule (chest low, visor high) and follow the squash, so a slide pulls them down with the body
   function setHeight(h) {
-    const s = h / total;
-    body.scale.y = s; body.position.y = h / 2;
-    chest.position.y = s * (radius + 0.42 * cyl);
-    shoulder.position.y = s * (radius + 0.86 * cyl);
+    curH = h;
+    const k = h / total;
+    body.scale.y = k; body.position.y = h / 2;
+    chest.position.y = k * (radius + 0.42 * cyl);
+    visor.position.y = k * (radius + 0.86 * cyl);
+    mount.position.y = -h / 2;                                           // mount origin = feet
+    if (mode === 'pod') place();
   }
   setHeight(total);
 
-  return {
-    capsule, parts,
-    // squash / stretch the capsule to the current collider height (metres). Feet stay at the origin.
+  function setMode(v) {
+    if (v === mode) return;                                              // idempotent: main.js calls it every frame
+    mode = v;
+    pod.visible = v !== 'hidden';
+    if (v === 'ragdoll') setHeight(total);                               // the physics body is the full standing capsule
+    else if (v === 'pod') { place(); pod.quaternion.setFromAxisAngle(Y_AXIS, yaw); }
+  }
+
+  function update(dt) {
+    t += dt;
+    if (!pod.visible) return;
+    // hit flash: the whole pod and its blade flare white for a moment
+    if (flashT > 0) {
+      flashT = Math.max(0, flashT - dt);
+      const f = (flashT / FLASH_TIME) * flashPow;
+      armor.emissive.setScalar(f * 0.8); core.emissiveIntensity = CORE_EMISSIVE + f * 2.5; bladeMat.emissiveIntensity = BLADE_EMISSIVE + f * 2;
+    }
+    // blade pose (idle hover, or the slash timeline)
+    const k = curH / total, bob = Math.sin(t * 2.3 + phase);
+    const p = attackP;
+    let th = ARC_HALF, yawB = BLADE.idleYaw + 0.04 * bob, pitchB = BLADE.idlePitch + 0.05 * bob, py = BLADE.pivot[1] + 0.035 * bob, stretch = 1, u = -1, fade = 0;
+    if (p >= 0 && p < 1) {
+      const wind = sstep(0, SLASH.p0, p), rec = sstep(SLASH.p1, 1, p), on = wind * (1 - rec);
+      const x = Math.max(0, Math.min(1, (p - SLASH.p0) / (SLASH.p1 - SLASH.p0)));
+      u = p < SLASH.p0 ? 0 : p > SLASH.p1 ? 1 : 1 - Math.pow(1 - x, 3);   // sweep: fast start, settles at the end
+      th = p <= SLASH.p1 ? ARC_HALF - 2 * ARC_HALF * u : -ARC_HALF + 2 * ARC_HALF * rec;    // sweep right -> left, then glide back round the FRONT (never through the pod)
+      yawB = yawB + (-th - yawB) * on;                                    // blade points radially outward while slashing
+      pitchB = pitchB * (1 - on);
+      py = BLADE.pivot[1] + (py - BLADE.pivot[1]) * (1 - on);
+      stretch = 1 + 0.18 * on;
+      fade = 1 - sstep(SLASH.p1, SLASH.p1 + SLASH.trailFade, p);
+    }
+    bladeRig.position.set(-Math.sin(th) * ORBIT_R, py * k, Math.cos(th) * ORBIT_R);
+    bladeRig.rotation.set(pitchB, yawB, 0, 'YXZ');
+    bladeRig.scale.set(1, k, stretch);
+
+    // crescent trail: drawn behind the blade (u = how far the blade has swept), fading with distance and after the sweep ends
+    if (u >= 0 && fade > 0.001) {
+      trail.visible = true; trail.position.y = BLADE.pivot[1] * k;
+      const a = trailCol.array, n = SLASH.trailSegs;
+      for (let i = 0; i <= n; i++) {
+        const ui = i / n, age = u - ui;
+        let al = 0;
+        if (age >= 0) al = Math.pow(Math.max(0, 1 - age / SLASH.trailTail), 1.4) * fade;
+        a[(i * 2) * 4 + 3] = al;                                          // outer edge: bright
+        a[(i * 2 + 1) * 4 + 3] = al * 0.12;                               // inner edge: soft
+      }
+      trailCol.needsUpdate = true;
+    } else trail.visible = false;
+  }
+
+  const api = {
+    pod,
+    // squash / stretch the pod to the current collider height (metres). Feet stay at the origin.
     setHeight,
-    setFeet(x, y, z) { capsule.position.set(x, y, z); },
-    showCapsule(v) { capsule.visible = v; },
-    showRagdoll(v) { ragGroup.visible = v; }
+    setFeet(x, y, z) { fx = x; fy = y; fz = z; if (mode === 'pod') place(); },
+    setYaw(a) { yaw = a; if (mode === 'pod') pod.quaternion.setFromAxisAngle(Y_AXIS, a); },
+    setMode,
+    setAttack(v) { attackP = v; },
+    flash(power = 1) { flashT = FLASH_TIME; flashPow = power; },
+    update
   };
+  return api;
 }
 
 export function createScene() {
@@ -379,5 +490,10 @@ export function createScene() {
     r.line.visible = r.hook.visible = true;
   }
 
-  return { renderer, scene, camera, addPuppet: (color) => createPuppet(scene, color), setItMarker, setFocus, setGrapple };
+  // ---- puppets: every pod is registered here so view.update(dt) can animate the floating blades, slash trails and hit flashes
+  const puppets = [];
+  function addPuppet(color) { const pu = createPuppet(scene, color); puppets.push(pu); return pu; }
+  function update(dt) { for (const pu of puppets) pu.update(dt); }
+
+  return { renderer, scene, camera, addPuppet, update, setItMarker, setFocus, setGrapple };
 }

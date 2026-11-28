@@ -23,7 +23,7 @@
   .hud { position: fixed; pointer-events: none; user-select: none; z-index: 5; font-variant-numeric: tabular-nums; }
 
   /* shared dark frosted glass: every HUD panel, the scoreboard and the join card */
-  #hud, #net, #toast, #resume, #netWarn, #scoreboard, #card {
+  #hud, #net, #toast, #resume, #netWarn, #scoreboard, #card, #hpBox, #killFeed .kf {
     background: var(--glass);
     border: 1px solid var(--edge);
     -webkit-backdrop-filter: blur(12px);
@@ -31,7 +31,7 @@
     box-shadow: 0 10px 34px rgba(0, 0, 0, .45);
   }
   @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-    #hud, #net, #toast, #resume, #netWarn, #scoreboard, #card { background: rgba(10, 14, 22, 0.94); }
+    #hud, #net, #toast, #resume, #netWarn, #scoreboard, #card, #hpBox, #killFeed .kf { background: rgba(10, 14, 22, 0.94); }
   }
   /* small pill panels: hidden while empty so no blank glass is ever drawn */
   #hud:empty, #net:empty, #toast:empty { display: none; }
@@ -58,8 +58,59 @@
     border-bottom: 2px solid var(--amber); }
 
   /* shown while the mouse is not captured during play */
-  #resume { left: 50%; bottom: 40px; transform: translateX(-50%); white-space: nowrap; text-align: center; color: var(--ink); font-size: 12px; letter-spacing: 3px;
+  #resume { left: 50%; bottom: 96px; transform: translateX(-50%); white-space: nowrap; text-align: center; color: var(--ink); font-size: 12px; letter-spacing: 3px;
     border-bottom: 2px solid var(--cyan); display: none; }
+
+  /* HP bar, bottom centre: dark glass, a bright fill that changes colour with health, and a pale "ghost" that trails behind after damage.
+     The thin line under it is the slash cooldown (fills while the blade recharges). */
+  #hpBox { left: 50%; bottom: 22px; transform: translateX(-50%); width: min(360px, calc(100vw - 32px)); box-sizing: border-box; padding: 7px 10px 8px; border-radius: 5px;
+    display: none; }
+  #hpBox .top { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 5px; font-size: 10px; font-weight: 700; letter-spacing: 2.5px; color: var(--dim); }
+  #hpBox .top b { color: var(--ink); font: 700 15px var(--mono); letter-spacing: 1px; }
+  #hpBox .top b small { color: var(--dim); font-size: 10px; letter-spacing: 2px; margin-left: 3px; }
+  #hpTrack { position: relative; height: 10px; border-radius: 2px; background: rgba(0, 0, 0, .55); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .08); overflow: hidden; }
+  #hpGhost, #hpFill { position: absolute; left: 0; top: 0; bottom: 0; width: 100%; transform-origin: 0 50%; border-radius: 2px; }
+  #hpGhost { background: rgba(255, 255, 255, .55); transition: transform .5s ease-out .25s; }
+  #hpFill { background: linear-gradient(90deg, #00b8d4, var(--cyan)); box-shadow: 0 0 10px rgba(0, 229, 255, .55); transition: transform .12s ease-out, background .2s; }
+  #hpBox.mid #hpFill { background: linear-gradient(90deg, #e08a00, var(--amber)); box-shadow: 0 0 10px rgba(255, 170, 0, .55); }
+  #hpBox.low #hpFill { background: linear-gradient(90deg, #d9402a, var(--coral)); box-shadow: 0 0 12px rgba(255, 123, 94, .7); }
+  #hpBox.low { border-color: rgba(255, 123, 94, .5); animation: hplow 0.9s ease-in-out infinite; }
+  #hpBox.hit { animation: hpshake .22s ease-out; }
+  #slashTrack { height: 2px; margin-top: 6px; border-radius: 1px; background: rgba(255, 255, 255, .08); overflow: hidden; }
+  #slashFill { height: 100%; width: 100%; transform-origin: 0 50%; background: var(--cyan); opacity: .8; }
+  @keyframes hplow { 50% { box-shadow: 0 10px 34px rgba(0, 0, 0, .45), 0 0 22px rgba(255, 123, 94, .35); } }
+  @keyframes hpshake { 0% { transform: translateX(-50%) translateY(0); } 25% { transform: translateX(calc(-50% - 4px)) translateY(2px); } 60% { transform: translateX(calc(-50% + 3px)); } 100% { transform: translateX(-50%); } }
+
+  /* hit-marker: four ticks round the crosshair that pop and fade on every slash that lands; gold + bigger on a KO */
+  #hitmarker { left: 50%; top: 50%; width: 0; height: 0; opacity: 0; }
+  #hitmarker i { position: absolute; left: -1px; top: -7px; width: 2px; height: 9px; background: #fff; border-radius: 1px; transform-origin: 1px 7px;
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, .55), 0 0 8px rgba(255, 255, 255, .75); }
+  #hitmarker i:nth-child(1) { transform: rotate(45deg) translateY(-6px); }
+  #hitmarker i:nth-child(2) { transform: rotate(135deg) translateY(-6px); }
+  #hitmarker i:nth-child(3) { transform: rotate(225deg) translateY(-6px); }
+  #hitmarker i:nth-child(4) { transform: rotate(315deg) translateY(-6px); }
+  #hitmarker.show { animation: hmpop .3s ease-out; }
+  #hitmarker.kill i { background: var(--amber); height: 12px; box-shadow: 0 0 0 1px rgba(0, 0, 0, .55), 0 0 12px var(--amber); }
+  #hitmarker.kill.show { animation: hmkill .5s ease-out; }
+  @keyframes hmpop { 0% { opacity: 1; transform: scale(.55); } 35% { opacity: 1; transform: scale(1.15); } 100% { opacity: 0; transform: scale(1.35); } }
+  @keyframes hmkill { 0% { opacity: 1; transform: scale(.5) rotate(0deg); } 30% { opacity: 1; transform: scale(1.35) rotate(0deg); } 100% { opacity: 0; transform: scale(1.8) rotate(45deg); } }
+
+  /* damage vignette: a red edge flash when YOU are hit */
+  #hurt { inset: 0; opacity: 0; background: radial-gradient(ellipse at center, rgba(255, 60, 40, 0) 52%, rgba(255, 60, 40, .55) 100%); }
+  #hurt.show { animation: hurt .45s ease-out; }
+  @keyframes hurt { 0% { opacity: 1; } 100% { opacity: 0; } }
+
+  /* kill feed, top right: newest on top, each entry fades out after ~5 s */
+  #killFeed { right: 12px; top: 12px; display: flex; flex-direction: column; align-items: flex-end; gap: 5px; max-width: 46vw; }
+  #killFeed .kf { display: flex; align-items: center; gap: 8px; padding: 5px 10px; border-radius: 4px; font-size: 12.5px; font-weight: 600; white-space: nowrap;
+    border-right: 2px solid var(--cyan); animation: kfin .18s ease-out, kfout .5s ease-in 5s forwards; }
+  #killFeed .kf.me { border-right-color: var(--amber); box-shadow: 0 10px 34px rgba(0, 0, 0, .45), inset 0 0 0 1px rgba(255, 170, 0, .35); }
+  #killFeed .kf .nm { display: inline-flex; align-items: center; gap: 6px; max-width: 150px; overflow: hidden; text-overflow: ellipsis; }
+  #killFeed .kf .sw { width: 9px; height: 9px; border-radius: 2px; flex: none; box-shadow: 0 0 0 1px rgba(255, 255, 255, .25); }
+  #killFeed .kf .ic { color: var(--cyan); font-family: var(--mono); font-size: 12px; letter-spacing: 1px; }
+  #killFeed .kf.void .ic { color: var(--coral); }
+  @keyframes kfin { from { opacity: 0; transform: translateX(14px); } to { opacity: 1; transform: none; } }
+  @keyframes kfout { to { opacity: 0; transform: translateX(10px); } }
 
   /* Tab-held scoreboard */
   #scoreboard { left: 50%; top: 18%; transform: translateX(-50%); width: 420px; max-width: calc(100vw - 32px); box-sizing: border-box; padding: 12px 14px;
@@ -108,6 +159,14 @@
 <div id="netWarn" class="hud">DISCONNECTED - reconnecting...</div>
 <div id="crosshair" class="hud"></div>
 <div id="grappleStatus" class="hud"></div>
+<div id="hitmarker" class="hud"><i></i><i></i><i></i><i></i></div>
+<div id="hurt" class="hud"></div>
+<div id="killFeed" class="hud"></div>
+<div id="hpBox" class="hud">
+  <div class="top"><span>PULSE</span><b><span id="hpNum">100</span><small>HP</small></b><span id="koNum">KO 0</span></div>
+  <div id="hpTrack"><div id="hpGhost"></div><div id="hpFill"></div></div>
+  <div id="slashTrack"><div id="slashFill"></div></div>
+</div>
 <div id="toast" class="hud"></div>
 <div id="resume" class="hud">CLICK TO CAPTURE MOUSE</div>
 <div id="scoreboard" class="hud">
@@ -137,7 +196,7 @@
       <b>Shift</b><span>slide (hold), Shift + Space = slide-hop</span>
       <b>F</b><span>dash</span>
       <b>Right-Click / E</b><span>grapple (hold)</span>
-      <b>Left-Click</b><span>melee slash (coming in the next stage)</span>
+      <b>Left-Click</b><span>energy-blade slash + magnetic lunge (hits harder the faster you go)</span>
       <b>R</b><span>stuck? respawn</span>
       <b>Tab</b><span>scoreboard (hold)</span>
       <b>M</b><span>mute</span>

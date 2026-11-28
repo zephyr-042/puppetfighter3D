@@ -1,24 +1,25 @@
 # Puppet Fighter 3D - architecture
 
 Browser 3D rewrite of the 2.5D `puppetfighter`, now a **dedicated multiplayer game**: Vite + Three.js + Rapier3D (WASM) client, Node.js + Express + Socket.IO server (Render.com).
-Client-authoritative movement: every player simulates their own Titanfall 2 style movement locally at 60 Hz (0 ms movement lag) and the server relays 30 Hz state.
+Client-authoritative movement: every player simulates their own Titanfall 2 style movement locally at 60 Hz (0 ms movement lag) and the server relays 30 Hz state. **Melee is the exception: the server judges every slash** (Step 7).
+Every player is ONE sleek armoured pod with a floating energy blade; the tumbling ragdoll is that same pod (one rigid capsule), never a humanoid.
 The old game stays live in its own repo; this is a separate project. The old local tag mode (bots, tag rules, rounds, sandbox) is gone.
 
 ## File map (one line per file; each file's header says what it loads after)
 
 ```
-index.html                 Join overlay (name, colour, Play, controls), minimal HUD (speed line, player count + ping, crosshair, toast, Tab scoreboard), loads src/main.js as a module. Cinematic dark-glass UI: all styling is CSS only (see Visual identity), the markup / ids main.js uses are unchanged.
+index.html                 Join overlay (name, colour, Play, controls), minimal HUD (speed line, player count + ping, crosshair, toast, Tab scoreboard) plus the melee HUD (bottom-centre HP bar + slash-cooldown line, animated crosshair hit-marker, top-right kill feed, red hit vignette), loads src/main.js as a module. Cinematic dark-glass UI: all styling is CSS only (see Visual identity), the markup / ids main.js uses are unchanged.
 package.json               Dependencies (three, rapier, socket.io-client, vite for the client; express, socket.io for the server), `start` = node server.js.
-server.js                  Express (serves dist/) + Socket.IO room: join / init, timeSync, ping, volatile state in, 30 Hz snapshot out, respawn, disconnect. Imports spawns from src/game/maps.js.
-src/config.js              Every tunable number, in OLD 2.5D units. SCALE converts to metres at the point of use. Includes the feel blocks `MANTLE` (ledge mantle) and `LAND` (landing camera dip).        (unchanged)
+server.js                  Express (serves dist/) + Socket.IO room: join / init, timeSync, ping, volatile state in, 30 Hz snapshot out, respawn, disconnect, and the server-authoritative melee judge (`slash` -> `hit` / `slashFx` / `killFeed`, hp / ko / dead / lastHitBy, void-fall KO credit, regen). Imports spawns from src/game/maps.js and `SCALE` / `MELEE` from src/config.js.
+src/config.js              Every tunable number, in OLD 2.5D units. SCALE converts to metres at the point of use. Includes the feel blocks `MANTLE` (ledge mantle), `LAND` (landing camera dip) and `MELEE` (Kinetic Slash: reach, cone, cooldown, damage / knockback ranges, lunge, tumble, KO / void / regen timing; read by player.js, main.js AND server.js).
 src/game/maps.js           Map data (DISTRICT_MAP "Glitch" parkour arena) + boxSpan() / floorSlabs() / rampSpan() helpers + validateMap(). Pure data: imported by BOTH client and server. Owns the cyber-dusk palette `C` (exported as `PALETTE`) and an optional per-ramp colour `c`.
-src/input.js               Keyboard / mouse state and the per-tick input snapshot (direction, jump / dash edges, slide held, grapple held = Right-Click or E; Left-Click latched as `attack` for Step 2 melee).
-src/physics/player.js      Movement rules as stepPlayer(state, input, ctx): momentum run, jump, double jump, air-strafe, b-hop, crouch-slide, dash, wall-run, wall-kick, grapple, ledge mantle, look-steering, `state.sfx`.   (unchanged)
-src/physics/ragdoll.js     On-demand cosmetic 6-part Rapier ragdoll (spawnRagdoll / syncRagdollMeshes / despawnRagdoll).      (unchanged)
+src/input.js               Keyboard / mouse state and the per-tick input snapshot (direction, jump / dash edges, slide held, grapple held = Right-Click or E; Left-Click latched as `attack`, read by stepPlayer for the Kinetic Slash).
+src/physics/player.js      Movement rules as stepPlayer(state, input, ctx): momentum run, jump, double jump, air-strafe, b-hop, crouch-slide, dash, wall-run, wall-kick, grapple, ledge mantle, look-steering, Kinetic Slash + magnetic lunge (`attackT`, `lungeT`, `slashEvt`), `applyKnockback` (victim side of a hit), `state.sfx`.
+src/physics/ragdoll.js     On-demand cosmetic SINGLE-BODY pod ragdoll: one dynamic Rapier capsule (1.8 m x r 0.35 m, `WALL_GROUP` only, damping 0.4 / 0.5), no limbs or joints (spawnRagdoll / syncRagdollMeshes / despawnRagdoll + ragdollCenter / ragdollVelocity).
 src/physics/world.js       Rapier world built from the map, one kinematic capsule per local player view, rays, detectWall, groundGap, placePlayer, hasFallen, raycastGrapple, checkLedgeMantle, hasHeadroom.      (unchanged)
-src/render/scene.js        Three.js renderer, cyber-dusk sky / fog / lights, District meshes + instanced emissive accent strips, per-player armour puppets with energy-core rings, grapple tethers (`setGrapple(slot, torso, anchor)`), setFocus.
+src/render/scene.js        Three.js renderer, cyber-dusk sky / fog / lights, District meshes + instanced emissive accent strips, per-player armoured pod puppets (energy-core rings + floating energy blade with a 140 degree slash sweep and crescent trail, one `pod` group for both play and ragdoll), `view.update(dt)`, grapple tethers (`setGrapple(slot, torso, anchor)`), setFocus.
 src/render/camera.js       Mouse-orbit chase camera (PointerLock) with a Rapier raycast boom, landing dip.      (unchanged)
-src/main.js                Boot, socket client, YOUR 60 Hz tick (stepPlayer / stepWorld), 30 Hz 'state' send, remote players (smoothed puppets, tethers, ragdolls), fall / R respawn flow, join overlay, HUD, Tab scoreboard, `createAudio()` (zero-asset Web Audio synth). Loads LAST.
+src/main.js                Boot, socket client, YOUR 60 Hz tick (stepPlayer / stepWorld), 30 Hz 'state' send, remote players (smoothed pods, tethers, ragdolls), slash request + melee events (`hit`, `slashFx`, `killFeed`), tumble / KO / fall / R respawn flow, join overlay, HUD (HP bar, hit-marker, kill feed), Tab scoreboard, `createAudio()` (zero-asset Web Audio synth incl. slash / impact / hurt / KO). Loads LAST.
 src/game/state.js          UNUSED since the tag mode was removed (plain-data match state). Safe to delete.
 src/game/rules.js          UNUSED since the tag mode was removed (tag rules). Safe to delete.
 ```
@@ -32,9 +33,9 @@ src/game/rules.js          UNUSED since the tag mode was removed (tag rules). Sa
   `KinematicCharacterController` only resolves collisions (slopes, steps). Gravity is applied by us, not by Rapier.
 - **Camera is view-only:** yaw / pitch live in the camera rig and never enter the simulation state.
 - **Physics code stays a pure function of (state, input)** where possible.
-- **Client-authoritative:** the server never simulates movement. It sanity-clamps what a client sends and relays it. (Cheating is possible by design for this stage; melee hits will need a decision, see Step 6 notes.)
+- **Client-authoritative:** the server never simulates movement. It sanity-clamps what a client sends and relays it. (Cheating is possible for movement by design; melee hits are the one thing the server judges, see Step 7.)
 - **Rendering budget:** District must hold 60+ FPS. No background geometry (no skyline / facade / street, only the dusk sky gradient), sun shadow map 1024 x 1024,
-  floor slabs and trims never cast shadows (they only receive), one shared geometry per puppet part, camera far plane 400 m. Emissive accent strips are NOT background geometry: they sit on map pieces and are drawn as 5 `InstancedMesh` batches (one draw call per shape + colour, no shadows). Add new accents to those batches, never as loose meshes. Do not add decorative geometry without checking FPS.
+  floor slabs and trims never cast shadows (they only receive), one shared geometry per pod part, camera far plane 400 m. Emissive accent strips are NOT background geometry: they sit on map pieces and are drawn as 5 `InstancedMesh` batches (one draw call per shape + colour, no shadows). Add new accents to those batches, never as loose meshes. Do not add decorative geometry without checking FPS.
 
 ## Visual identity: cinematic cyber-dusk
 
@@ -70,11 +71,14 @@ Every mood number lives in the constants at the top of `scene.js` (`SKY_STOPS`, 
 - **Accent strips:** `strip(kind, key, x, y, z, sx, sy, sz, q?)` pushes a matrix into `glow.box.{cyan,amber,gold}` or `glow.cyl.{cyan,amber}`; at the end of `createScene` each non-empty list becomes one `InstancedMesh` (unit box / unit cylinder scaled per instance, `MeshStandardMaterial` with `emissive`, `emissiveIntensity` 1.8, `frustumCulled = false`, no shadows). Strips are 0.06 m thick across the face (0.03 m proud) so they do not z-fight at the 400 m far plane. Current District: 84 strips in 5 draw calls (52 cyan, 8 amber, 16 gold, 4 + 4 cylinder rings).
 - **Wall-run readability:** the cyan run-height line sits at 36 % of the wall (2.25 m on the 6.25 m walls) and the crown line at the top, so the wall-run surface and its end are readable at 760 units / s.
 
-**Runner suit (`scene.js` `createPuppet`)**
+**Armoured pod + floating energy blade (`scene.js` `createPuppet`)**
 
-- Armour material: the player colour lerped 50 % toward `0x10141b`, `roughness 0.35`, `metalness 0.25`. Used by the capsule and all 6 ragdoll parts.
-- Energy core material: the pure player colour as `color` and `emissive`, `emissiveIntensity 0.65`. Capsule: a chest ring and a thinner shoulder ring (shared torus geometry, rotation-symmetric, so the faceless capsule needs no facing); `setHeight(h)` moves them with the squash so a slide pulls them down with the body. Ragdoll: an emissive chest band is a child of the torso and a shoulder cap is a child of each arm, so `syncRagdollMeshes` needs no change.
-- Still one shared geometry per part (the ring / band / cap geometries are shared too); each puppet owns exactly two materials.
+- ONE pod per player, always: a satin-dark armour capsule (player colour lerped 50 % toward `0x10141b`, `roughness 0.35`, `metalness 0.25`) with a glowing chest ring and a thinner visor ring (the energy-core material: pure player colour as `color` and `emissive`, `emissiveIntensity 0.65`; shared torus geometry, rotation-symmetric). `setHeight(h)` squashes the body and moves rings AND blade with it, so a slide pulls everything down.
+- **The pod IS the ragdoll.** Hierarchy: `pod` (origin = pod CENTRE, driven by `setFeet` + `setYaw` in normal play, or by `syncRagdollMeshes(rag, puppet.pod, out)` while tumbling) -> `mount` (origin = FEET, `y = -height / 2`) -> body, chest ring, visor ring, `bladeRig`, `trail`. `setMode('pod' | 'ragdoll' | 'hidden')` is idempotent; `'ragdoll'` pins the standing height because the physics body is the full 1.8 m capsule. There are no `parts`, no `showCapsule` / `showRagdoll` any more, and nothing ever changes shape.
+- **Floating energy blade.** Hovers off the pod's RIGHT side at `x -0.55, y 1.05, z 0.2` (pod-local, +Z = facing, -X = right), tilted up and slightly outward with a slow bob. Geometry: a dark-steel hilt + guard ring, a lens-shaped emissive blade (`len 1.5 m`, `BLADE_EMISSIVE 2.2`) and a thinner white-hot edge (`MeshBasicMaterial`, `toneMapped: false`). Shared geometry; each puppet owns 5 materials (armour, core, blade, edge, trail).
+- **Slash (`setAttack(p)`, p = `1 - attackT / MELEE.attackTime`, -1 = idle).** Timeline: wind-up `p 0..0.12` (blade turns outward), sweep `0.12..0.62` (ease-out) and recovery `0.62..1`. During the sweep the hilt ORBITS the pod's vertical axis at radius `hypot(0.55, 0.2) = 0.585 m` through a **140 degree arc, +70 to -70 degrees, right -> left across the front**, blade pointing radially outward (so it can never clip the pod); the arc starts exactly at the idle pivot. Recovery glides back round the FRONT. The pod is yawed to the slash direction for the swing (`attackYaw`).
+- **Crescent trail.** One flat additive ribbon per puppet (28 segments, outer radius 2.1 m, up to 1.1 m wide, pointed at both ends) with per-vertex RGBA colours: `update()` rewrites only the alpha so the crescent is drawn behind the blade, brighter on the outer edge, and fades out after the sweep. `toneMapped: false`, `depthWrite: false`, `fog: false`, hidden when idle.
+- **Hit flash.** `puppet.flash(power)`: armour emissive, core and blade intensity flare for 0.18 s. `view.update(dt)` (call it once per frame) animates every puppet (blade pose, trail, flash).
 
 **Glass UI (`index.html`, CSS only)**
 
@@ -94,7 +98,8 @@ Every mood number lives in the constants at the top of `scene.js` (`SKY_STOPS`, 
 | 3 | Maps: District wired in (colliders, meshes, spawns, fall respawn); the other maps one at a time | in progress (District done, see Step 3 progress) |
 | 4-5 | Local tag rules, bots, HUD, cosmetic ragdolls | superseded: tag mode and bots removed; the cosmetic ragdoll stays (Step 6) |
 | 6 | Dedicated Node.js + Socket.IO server, join overlay, 30 Hz client-authoritative netcode, smoothed remote players, ragdoll respawn | done (see Step 6) |
-| next | Melee slash (Left-Click), KOs, hit validation | |
+| 7 | Melee: Kinetic Slash, magnetic lunge, knockback KOs, server-authoritative hits, HP bar / hit-marker / kill feed, single-pod ragdoll | done (see Step 7) |
+| next | Step 2 of melee: blocking / parry, hit-stop, lag compensation, pickups | |
 
 ## Step 1 notes
 
@@ -328,15 +333,15 @@ Last run (after the cyber-dusk palette change, which touches no coordinates): ok
 | Event | Dir | Payload | Notes |
 |-------|-----|---------|-------|
 | `join` | C -> S | `{ name, color }` | Name trimmed to 16 chars, colour is a 0xRRGGBB integer. Rejected with `full` above `MAX_PLAYERS`. |
-| `init` | S -> C | `{ id, spawn, players, serverTime }` | `spawn` = `{x,y,z}` picked from `DISTRICT_MAP.spawns * SCALE`, the farthest from every live player. `players` includes you (filter by `id`). A repeat `init` (re-join after a reconnect) resets the remote list. |
+| `init` | S -> C | `{ id, spawn, hp, maxHp, players, serverTime }` | `spawn` = `{x,y,z}` picked from `DISTRICT_MAP.spawns * SCALE`, the farthest from every live player. `players` includes you (filter by `id`). A repeat `init` (re-join after a reconnect) resets the remote list. |
 | `playerJoined` | S -> others | public player `{ id, name, color, x..z, vx..vz, yaw, height, flags, ko, ping }` | |
 | `playerLeft` | S -> all | `id` | |
 | `timeSync` | C -> S | ack callback `cb(Date.now())` | Client times the round trip: `rtt = now - t0`, `clockOffset = serverTime + rtt / 2 - Date.now()`, keeping the quickest samples. Burst of 5 on connect, then every 2 s. `serverNow()` in main.js = `Date.now() + clockOffset`. |
 | `ping` | C -> S | `rtt` (ms, smoothed) | Shown on the scoreboard. |
 | `state` | C -> S (volatile) | `{ x,y,z, vx,vy,vz, yaw, height, sliding, dashing, wallRunning, grappleActive, grappleAnchor, ragdoll }` | 30 Hz (every 2nd sim tick). Server clamps ranges, ignores packets closer than 10 ms, nulls the anchor unless `grappleActive`. |
-| `snapshot` | S -> room (volatile) | `{ t, players: [{ id, ...dynamic fields, ko, ping }] }` | 30 Hz `setInterval(1000 / 30)`. Static info (name, colour) only travels in `init` / `playerJoined`. Clients drop snapshots with `t` older than the last one. |
+| `snapshot` | S -> room (volatile) | `{ t, players: [{ id, ...dynamic fields, ko, ping, hp, maxHp, dead }] }` | 30 Hz `setInterval(1000 / 30)`. Static info (name, colour) only travels in `init` / `playerJoined`. Clients drop snapshots with `t` older than the last one. |
 | `respawnReq` | C -> S | none | Sent on a fall below `MAP.fallY` or `R`. The server marks the player `ragdoll`, waits `RESPAWN_DELAY_MS` (1200 ms = the tumble) and then picks a clean spawn. Duplicates while pending are ignored. |
-| `respawn` | S -> C | `{ spawn }` | The client re-places the capsule, resets all movement state (`createPlayerState`) and faces the middle of the roof. |
+| `respawn` | S -> C | `{ spawn, hp }` | The client re-places the capsule, resets all movement state (`createPlayerState`) and faces the middle of the roof. |
 
 ### Client loop (main.js)
 
@@ -347,19 +352,84 @@ Last run (after the cyber-dusk palette change, which touches no coordinates): ok
   (the faceless capsule does not need it; yaw only orients ragdolls).
 - **Grapple tethers:** `view.setGrapple(slot, torso, anchor)`. Slot 0 is you, slots 1-5 go to remotes (freed on leave). That is why the server caps the room at 6 by default. Before raising `MAX_PLAYERS`, check how many slots `scene.js` allocates.
 - **Ragdolls:** falling below `MAP.fallY` (`hasFallen`) or `R` -> `startFall()`: a local ragdoll tumbles where you fell, the capsule is parked on the last spawn and hidden, `state.ragdoll = true` is sent with the frozen fall position and velocity,
-  `respawnReq` goes out. Remotes see the flag flip and spawn their own cosmetic ragdoll at that position / velocity (`spawnRagdoll` / `despawnRagdoll`), so ragdolls are NOT synced bit for bit. When the flag drops, the ragdoll is removed and the puppet snaps to the new spawn.
+  `respawnReq` goes out. Remotes see the flag flip and spawn their own cosmetic pod ragdoll (the same single capsule body, driving the same pod mesh) at that position / velocity (`spawnRagdoll` / `despawnRagdoll`), so ragdolls are NOT synced bit for bit. Hits use the same mechanism, see Step 7. When the flag drops, the ragdoll is removed and the puppet snaps to the new spawn.
   If the server stays silent for 4 s you respawn locally (offline fallback). While the capsule is parked, input is locked (`state.locked`) but the latches still drain.
 - **Join flow:** the world and scene boot behind the overlay. Play saves name + colour to `localStorage` (`pf3d.name`, `pf3d.color`), requests PointerLock (inside the click so the browser allows it) and sends `join`; `init` hides the overlay.
   After a socket reconnect the client re-joins automatically (new id, new spawn). A "DISCONNECTED" banner shows meanwhile. The HUD shows a "click to capture mouse" hint whenever the pointer is not locked during play.
 - **HUD:** top-left tuning line (speed, runT, bhop, dash, air jumps, grapple, wall-run, slide boost), bottom-left `PLAYERS n  PING ms`, centre crosshair + grapple status, toast line (join / leave / mute), `Tab` held = scoreboard (`Player | KOs | Ping`, KOs sorted descending).
-- **Input (`input.js`):** grapple = `KeyE` or right mouse (button 2), held; the grapple fires on the press edge inside `stepPlayer`. Left mouse (button 0) is latched as `attack` only while the pointer is locked, and nothing reads it yet (melee stage).
+- **Input (`input.js`):** grapple = `KeyE` or right mouse (button 2), held; the grapple fires on the press edge inside `stepPlayer`. Left mouse (button 0) is latched as `attack` only while the pointer is locked; `stepPlayer` reads it (Step 7).
   Key events from text inputs are ignored, so the name field accepts spaces.
 
 ### Known limits / next
 
-- KOs are always 0 until melee exists. The server already carries a `ko` field per player and puts it in every snapshot.
-- Client-authoritative means a modified client can teleport or fake `ragdoll`. The melee stage should make the server (or the victim) the judge of melee hits, using `serverNow()`-stamped swings.
+- KOs, HP and melee are live (Step 7). `ko`, `hp`, `maxHp` and `dead` ride in every snapshot.
+- Client-authoritative means a modified client can teleport or fake `ragdoll`. Melee hits ARE judged by the server (Step 7) from the positions it holds; `serverNow()`-stamped swings / lag compensation are still a future step.
 - No lag compensation or extrapolation: remotes trail the real position by roughly one snapshot interval plus the smoothing lag (about 60-100 ms plus network).
 - One room, one map (District), no lobby, no names above heads, no spectating.
 - Not verified in a browser with real Rapier: server.js was exercised with a stub map and two socket clients (join, init, playerJoined, timeSync, ping, state -> snapshot, respawn delay and duplicate guard, playerLeft, /healthz, static fallback).
   The client (`main.js`) was only syntax-checked; play-test the join flow, tether slots, ragdoll hand-off and smoothing.
+
+## Step 7: Kinetic Melee Combat, Magnetic Lunge and Knockback KOs
+
+### Feel in one paragraph
+
+Left-Click swings the floating energy blade in a 140 degree arc and, in the same tick, snaps you forward along your aim (or onto the nearest opponent inside the cleave cone). The faster you are going when you click, the harder it hits and the further it throws them. A fast slash lands a KO-sized blast, a heavy hit sends the victim's pod tumbling and bouncing across the roof, and the lunge hands your momentum straight back so a slash chains into wall-runs and b-hops.
+
+### `MELEE` (src/config.js, old units; the server imports the same block)
+
+| Key | Value | Meaning |
+|-----|-------|---------|
+| `reach` | 180 (4.5 m) | forward reach of the cleave (server adds `radiusPad` 14 = 0.35 m, because it measures to the capsule axis) |
+| `coneCos` | 0.65 | ~50 degrees each side of the slash direction (targets inside the body, < 0.45 m, are always in) |
+| `vertical` | 88 (2.2 m) | max vertical distance between the two capsule centres |
+| `cooldown` / `attackTime` | 0.55 s / 0.22 s | gate between slashes / length of the blade swing |
+| `baseDmg` .. `maxDmg` | 35 .. 75 | scales LINEARLY with incoming horizontal speed `dmgSpeedMin` 300 .. `dmgSpeedMax` 760 units / s |
+| `baseKnock` .. `maxKnock` | 420 .. 880 | knockback units / s over the same speed range (10.5 .. 22 m/s); `knockUp` 0.3 adds an upward launch so the victim leaves the floor |
+| `lungeSpeed` / `lungeDuration` / `standOff` | 560 / 0.14 s / 36 | lunge speed (never lowers a faster speed), duration, and how far short of a locked target it stops (0.9 m) |
+| `hitStun` | 0.25 s | victim cannot steer after any hit |
+| `tumbleKnock` / `tumbleTime` | 640 / 0.85 s | a hit with at least this knockback (about 520 units / s incoming speed) tumbles the pod instead of just a stagger |
+| `koRespawnDelay` / `voidCredit` | 2000 ms / 4 s | KO tumble before the server respawns you / window in which a void fall credits the last attacker |
+| `maxHp` / `regenDelay` / `regenRate` | 100 / 4 s / 8 hp per s | hit points and slow regeneration (server) |
+
+### Client (`player.js`, `main.js`)
+
+- **Start of a slash** (`stepPlayer`, `inp.attack && attackCd <= 0`): `attackT = 0.22`, `attackCd = 0.55`, `sfx 'slash'`, and `state.slashEvt = { dirX, dirZ, speed }` where `speed` is the horizontal speed BEFORE the lunge (old units / s). `main.js` forwards it as `socket.emit('slash', { dir: { x, z }, speed })` and clears it.
+- **Aim** (`meleeAim()` in main.js): the camera look direction flattened to the ground (the crosshair), plus `targets` = the visible feet positions of live opponents. `stepPlayer` locks the NEAREST target inside `reach` + the cone (and the vertical limit); the slash direction then points straight at it (aim assist), and the lunge is shortened so you stop 0.9 m short.
+- **Magnetic lunge:** `lungeT = lungeDuration`. Each tick the horizontal velocity is set along the lunge direction at `max(lungeSpeed, incoming speed)` (no friction, no air-strafe). On the last tick the velocity is set back to the INCOMING speed along the lunge direction (unless a wall stopped it), so b-hop chains and the soft 760 ceiling are untouched. No lunge while dashing, hooked or wall-running (the slash itself still fires, the rail is kept); catching a wall / hook mid-lunge cancels it. Gravity and jumps work normally during a lunge.
+- **Being hit** (`socket 'hit'` with `targetId === me`): HP from the event, red vignette, hurt sound. Then either `applyKnockback(me, kx, ky, kz)` (stagger: opposing velocity cancelled, knockback added, `stunT = hitStun`, grapple / dash / slide / lunge cut) or, if `|knock| >= tumbleKnock` or the hit is lethal, `startTumble`.
+- **Tumble / KO flow** (`startTumble`, `endTumble`, `tumbling`, `awaiting`): the kinematic capsule is parked, ONE dynamic pod capsule is spawned at your feet with `knock + 50 % of your speed` and a tip-over spin, the puppet switches to `'ragdoll'` mode (the same pod mesh) and `ragdoll: true` goes out with the launch velocity so remotes tumble their own copy. Non-lethal: after `tumbleTime` the capsule is re-placed at the pod's resting centre (feet = centre - 0.35 m), you keep 60 % of its velocity (max 14 m/s) and control returns. Lethal: you stay down until the server's `respawn` (2 s). Blasted below `MAP.fallY` while tumbling = a fall: `respawnReq` is sent and the server credits the last attacker.
+- **HUD:** bottom-centre dark-glass HP bar (`100 HP`, cyan -> amber -> coral, a pale ghost trails the damage, red pulse when low, shake on hit) with a thin slash-cooldown line and the KO count; crosshair hit-marker (four ticks that pop; gold + larger on a KO, also for void KOs); top-right kill feed (killer swatch `SLASH` / `VOID` victim swatch, newest on top, fades after ~5 s, your own lines highlighted in amber, max 5); red edge vignette when you are hit.
+- **Audio** (`createAudio`, zero assets, all take a loudness `v`): `slash` (bandpass whoosh + energy hum), `impact` (thud + crack + metallic ring, louder with damage), `hurt` (you were hit), `ko` (sub boom + falling noise). Other players' slashes and impacts fade with distance (40 m). `play(name, vol)`.
+- **Remote swings:** `slashFx { id, yaw }` starts their blade sweep (`r.attackT`) and whoosh; their pod faces the slash direction for the swing.
+
+### Server (`server.js`): the judge
+
+Per player: `hp`, `maxHp`, `ko`, `dead`, `lastHitBy`, `lastHitAt`, `lastDamageAt`, `lastSlash`. The 30 Hz `snapshot` is unchanged except for the new fields.
+
+| Event | Dir | Payload | Notes |
+|-------|-----|---------|-------|
+| `slash` | C -> S | `{ dir: { x, z }, speed }` | `dir` horizontal aim (normalised server-side; a degenerate vector falls back to the last `yaw`), `speed` incoming horizontal speed in old units / s |
+| `slashFx` | S -> others | `{ id, yaw }` | every cooldown-valid swing, hit or miss (not sent to the swinger) |
+| `hit` | S -> room | `{ attackerId, targetId, damage, knockVec: { x, y, z }, kill, hp }` | `knockVec` in m / s (horizontal along `dir`, `y = knockUp * horizontal`); `hp` = the target's hp after the hit |
+| `killFeed` | S -> room | `{ killerId, killerName, killerColor, victimId, victimName, victimColor, cause: 'slash' or 'void', ko }` | sent when a KO is credited |
+
+`resolveSlash` (pure, in server.js) rules, in order:
+
+1. The swinger must be joined, not `dead`, not `ragdoll`, not `respawnPending`; the cooldown is `MELEE.cooldown` minus an 80 ms jitter allowance.
+2. **Speed is sanity-clamped:** `min(claimed, lastSeenHorizontalSpeed * 1.25 + 60, dmgSpeedMax)`. A client cannot claim 760 units / s while standing still (it gets about base damage). Damage = `lerp(35, 75, t)` rounded, knockback = `lerp(420, 880, t) * SCALE`, `t = (speed - 300) / (760 - 300)` clamped.
+3. Each OTHER joined, alive, non-ragdoll, non-respawning player is hit if: horizontal distance <= `reach * SCALE + radiusPad * SCALE` (4.85 m to the axis), `dot(dir, toTarget) >= coneCos` (skipped inside 0.45 m), and `|centre dy| < 2.2 m`. The cleave hits EVERY target inside the cone.
+4. Damage is applied, `lastHitBy` / `lastHitAt` set, `hit` broadcast. At `hp <= 0`: `dead = true`, `+1 ko` to the attacker, `killFeed` (`slash`), and a respawn after `koRespawnDelay` (clean spawn, full hp, `respawn { spawn, hp }`). A KO'd pod's `ragdoll` flag cannot be cleared by state packets, and it cannot be hit or swing until it respawns.
+5. **Void credit:** `respawnReq` from a player who was hit within `voidCredit` (4 s) credits `lastHitBy` with a KO (`killFeed` cause `void`, once; a duplicate request while respawning does nothing). A plain fall, or one more than 4 s after the hit, credits nobody.
+6. **Regen:** after `regenDelay` without damage, `regenRate` hp / s, in the snapshot loop.
+
+### Changes vs the original brief (and why)
+
+- Server `reach` adds the pod radius (`radiusPad`), since it measures to the capsule axis; at the 4.5 m edge a target you can visibly touch would otherwise miss.
+- Added `knockUp`, `hitStun`, regen, a heavy-hit tumble threshold and a speed sanity clamp. None are required; all are tunables in `MELEE`.
+- The slash `dir` is the magnetic-lock direction when a target was locked, otherwise the camera aim.
+- The remote swing animation comes from a dedicated `slashFx` event, not from the 30 Hz state packet (a volatile packet can be dropped; the event cannot).
+
+### Not verified in a real browser / with real Rapier
+
+- server.js was run against stub `express` / `socket.io` modules: cone, reach, vertical, cooldown, speed clamp, linear scaling, KO, `killFeed`, respawn with full hp, void credit (and its window), no double credit, regen. `player.js` was run against a stub flat world (lunge distance and stand-off, momentum hand-back, cone gate, knockback, stun). `scene.js` / `ragdoll.js` against a stub `three` / Rapier (blade arc 70 to -70 degrees, stays outside the pod, trail alpha, flash, one body + one capsule + no joints). `main.js` against stubbed DOM / socket / engine (slash request, remote swing, light hit, heavy-hit tumble and recovery, KO until `respawn`, HUD updates, hit-marker, kill feed).
+- Needs play-testing with real Rapier and a real GPU: how the 4.5 m reach and the 1.5 m blade FEEL together, pod bounce (`restitution 0.3`; if the tumble looks floaty raise `RAGDOLL_RIG.gravityScale`), the placement after a tumble (feet = centre - 0.35 m) against walls, the additive trail brightness, the sound levels, and the `world.js` / `input.js` / `camera.js` files, which this change did not touch (`input.js` must deliver `snap.attack`, as documented).
