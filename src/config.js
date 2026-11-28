@@ -92,7 +92,7 @@ export const DASH = {
 // ---- grapple / sticky hand (hold E or right mouse): hooks level geometry or another player, pulls you toward the anchor
 // while keeping your sideways speed (swing arc). Space while hooked = release with an upward pop.
 export const GRAPPLE = {
-  maxRange: 1120,      // old units (28 m): longest shot at level geometry
+  maxRange: 1680,      // old units (42 m): longest shot at level geometry (ground -> the Story 3 sky anchors, y 410 .. 445)
   playerRange: 640,    // old units (16 m): longest shot at another player
   pullAccel: 1450,     // units / s^2 added toward the anchor while hooked
   maxPullSpeed: 780,   // units / s: cap on the speed TOWARD the anchor (sideways speed is untouched, so a swing keeps its arc)

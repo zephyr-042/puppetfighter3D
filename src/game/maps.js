@@ -1,46 +1,52 @@
 /* ============================================================================
    src/game/maps.js
-   puppetfighter3D: map data (DISTRICT_MAP, "APEX ROOFTOP") plus the shared boxSpan / floorSlabs / rampSpan helpers and validateMap() at the bottom.
+   puppetfighter3D: map data (DISTRICT_MAP, "APEX ROOFTOP", now a 3-STORY vertical arena) plus the shared boxSpan / floorSlabs / rampSpan helpers and validateMap() at the bottom.
    ALL numbers are original 2.5D units (SCALE = 0.025 is applied later by world.js / scene.js). x: west -> east, z: north (-) -> south (+),
    y: height above the floor (0 = floor).
 
    Conventions
    - boxes:   { x, z, hw, hd, h, c, y0? }  centre, half width / depth, TOP height h and optional BOTTOM height y0 (default 0).
-              y0 > 0 = a true floating box (skybridge, catwalk, arch): players slide under it, grapple over it, wall-run along it.
+              y0 > 0 = a true floating box (walkway, sky platform, grapple anchor): players slide under it, grapple over it, wall-run along it.
               Vertical centre = (y0 + h) / 2, full height = h - y0. Use boxSpan(b) so world.js and scene.js agree.
    - pillars: { x, z, r, h, c }       round, grab-able (orbit, release to fling)
    - holes:   { x, z, hw, hd }        floor holes, stand over one and you fall
    - ramps:   { x, z, hw, hd, y0, y1, dir, base?, c? }
               centre, half extents, surface height at the LOW edge (y0) and HIGH edge (y1). NOTE: ramp y0 is a SURFACE height,
-              it is not the box y0. `base` (default 0) is the height of the solid wedge's underside.
+              it is not the box y0. `base` (default 0) is the height of the solid wedge's underside (the Story 3 sky-ramps use base 130 = the walkway top).
               dir = direction of ASCENT: '+x' | '-x' | '+z' | '-z'. Height is linear along that axis.
               `c` (optional, [r, g, b]) is the ramp's palette colour; physics ignores it, scene.js uses it for the material and, for C.SPEED ramps, the gold chevrons.
    - c: [r, g, b] 0..255 (the hex() helper converts 0xRRGGBB, so the palette below reads like web colours). The palette is also exported as PALETTE so scene.js can
      recognise a piece by reference (b.c === PALETTE.WALL) and attach its painted accent bands without any extra fields in the map data.
 
-   APEX ROOFTOP: a sunlit Mirror's Edge style combat-parkour arena, 4400 x 3000 (hw 2200, hd 1500), point-symmetric (x, z) -> (-x, -z) except the two landmarks.
-   Colour split: ~85 % calm limestone / slate / concrete, ~15 % crimson-terracotta (wall-run strips, painted in scene.js) and saffron gold (speed ramps, beacon).
-     centre  : DUEL DECK (hw 440, hd 260, h75), reached by a W and an E ramp. Two skylight RING-OUT PITS (hw 380, hd 140) lie north and south of it (z = -460 / +460).
-               A titanium SKYBRIDGE (underside 165, top 185) runs north-south over the deck and both pits on 4 steel columns, with a crimson wall-run FIN floating above it.
-     N / S   : staggered wall-run canyons, 3 slate panels per side (840 long, 240 high). North chain flows west -> east: W1 (-1050, -1080) -> W2 (-150, -760) -> W3 (750, -1080)
-               -> steel launch pad (h110) -> saffron downhill speed ramp. The south chain is the point-symmetric twin (it flows east -> west).
-     E / W   : two ASYMMETRIC landmarks. West = steel Industrial Helipad (h95) + the SW Industrial Arch. East = limestone Atrium (h95) + the NE Communications Spire with a saffron beacon.
-     corners : 4 swing pillars (r38, h300) at (+-1680, +-1220).
-   Layout deviations from the written blueprint (all forced by validateMap, which must report 0 errors):
-     - skybridge hd 780 -> 720: at 780 it ran through the middle wall-run panels (z = +-760), a 3D overlap.
-     - bridge columns h 185 -> 165 and arch legs h 260 -> 220: they now stop at the underside of what they carry instead of overlapping it.
-     - speed ramps hd 200 -> 160 (centre z -600 / +600, still starting flush at the pad edge, 110 high): at 200 the low edge touched the Atrium / Helipad wall with no runout.
+   APEX ROOFTOP, 3 STORIES: 4400 x 3000 (hw 2200, hd 1500), point-symmetric (x, z) -> (-x, -z).
+     STORY 1  ground (y 0)   : two ring-out skylight pits (hw 420, hd 140) at z = -540 / +540. North + South wall-run canyons (lanes z = +-920 and +-1280, h270, 4 slate panels per
+                               side, alternating lanes, each overlapping the next by 200 so you can hop across). The north chain flows west -> east into a saffron-gold launch
+                               pad (h140) and a 140 -> 0 downhill speed ramp aimed at the east citadel (the south chain is the twin, flowing east -> west into the west citadel).
+     STORY 2  y 110 .. 140   : CENTRAL DUEL DECK (hw 520, hd 300, h110), reached by 4 ground ramps (0 -> 110, two per side, flanking the walkway). EAST + WEST CITADEL DECKS
+                               (hw 340, hd 460, h140), reached by wide outer ramps (0 -> 140) and linked to the duel deck by two elevated SKY-WALKWAYS (y 110 .. 130, 220 wide):
+                               one continuous second-story highway (deck 110 -> walkway 130 -> citadel 140: every join is a step <= 20, inside MOVE.stepHeight 24).
+                               Each citadel carries two tall wall-run panels standing ON the deck (y 140 .. 380).
+     STORY 3  y 270 .. 495   : UPPER SKY-CITADEL platform (hw 220, hd 220, y 270 .. 295) on 4 corner columns standing on the duel deck, reached by two AERIAL SKY-RAMPS that
+                               rise out of one half of each walkway, crowned by a crimson aerial wall-run fin (y 325 .. 495). Six floating gold SKY-GRAPPLE ANCHORS (y 410 .. 445) hang over
+                               N, S, NW, NE, SW, SE; 4 corner grapple towers (h460, gold caps) + 4 swing pillars (r40, h360). GRAPPLE.maxRange is 1680 (42 m) so the ground reaches Story 3.
+   Layout deviations from the written blueprint (all forced by validateMap or by the controller's step height):
+     - sky-walkway hw 360 -> 260: the slab must fit between the duel deck (x 520) and the citadel (x 1040); at 360 it overlapped the h140 citadel in 3D.
+     - platform columns y0 110 (stand on the duel deck, top 270): a column from y 0 would overlap the deck box in 3D.
+     - sky-ramps rise 130 -> 295, not 270: 295 is the platform TOP; a 270 ramp leaves a 25 unit lip (> MOVE.stepHeight 24) that walking players could not climb.
+     - the sky-ramps are 120 wide and sit on one half of the 220 wide walkway (the other half stays open), so the second-story highway stays continuous.
+     - the 4 duel-deck ground ramps sit beside the walkway (z 110 .. 300), not under it, so the walkway never bonks your head halfway up.
+     - citadel outer ramps stop at x 2120 so the low edge still meets open ground inside the rect (validateMap runout rule).
    ============================================================================ */
 
 function hex(n) { return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
 
 var C = {
-  DECK:   hex(0xe4e0d8),   // central duel deck + east atrium: warm limestone
-  STEEL:  hex(0x363d47),   // columns, launch pads, helipad, arch, spire shaft: dark anodized gunmetal
-  COVER:  hex(0x9aa3ad),   // low cover blocks: weathered concrete
-  BRIDGE: hex(0xeef1f5),   // central skybridge: titanium white
-  WALL:   hex(0x2d3540),   // wall-run panels + aerial fin: deep slate (scene.js adds the crimson-terracotta 0xe04f3e runner-vision strips)
-  SPEED:  hex(0xf59e0b),   // downhill speed ramps + the spire beacon cap: rich saffron gold (scene.js paints chevrons on the ramps)
+  DECK:   hex(0xe4e0d8),   // duel deck, citadels, access ramps: warm limestone
+  STEEL:  hex(0x525d6b),   // columns, launch pads, tower shafts: architectural slate steel (softened from near-black)
+  COVER:  hex(0x9aa3ad),   // weathered concrete
+  BRIDGE: hex(0xeef1f5),   // walkways, sky platform, sky-ramps: titanium white
+  WALL:   hex(0x465466),   // wall-run panels + fins: crisp architectural slate (scene.js adds the crimson-terracotta 0xe04f3e runner-vision strips)
+  SPEED:  hex(0xf59e0b),   // downhill speed ramps, launch pads' ramps, sky anchors, tower caps: rich saffron gold
   PILLAR: hex(0x475569)    // round swing pillars: slate steel
 };
 export var PALETTE = C;    // scene.js matches pieces to accents by reference (b.c === PALETTE.WALL), so keep one array per colour
@@ -59,73 +65,83 @@ function addBox(x, z, hw, hd, h, c, y0) { boxes.push(box(x, z, hw, hd, h, c, y0)
 function addBoxSym(x, z, hw, hd, h, c, y0) { addBox(x, z, hw, hd, h, c, y0); addBox(-x, -z, hw, hd, h, c, y0); }
 function addPillarSym(x, z, h, c, r) { pillars.push(pillar(x, z, h, c, r)); pillars.push(pillar(-x, -z, h, c, r)); }
 var OPP = { '+x': '-x', '-x': '+x', '+z': '-z', '-z': '+z' };
-function addRamp(x, z, hw, hd, y0, y1, dir, c) {
+function addRamp(x, z, hw, hd, y0, y1, dir, c, base) {
   var r = { x: x, z: z, hw: hw, hd: hd, y0: y0, y1: y1, dir: dir };
   if (c) r.c = c;                                    // optional palette colour (visual only; world.js does not read it)
+  if (base) r.base = base;                           // underside of the wedge (default 0); > 0 = an aerial ramp
   ramps.push(r);
 }
-function addRampSym(x, z, hw, hd, y0, y1, dir, c) { addRamp(x, z, hw, hd, y0, y1, dir, c); addRamp(-x, -z, hw, hd, y0, y1, OPP[dir], c); }
+function addRampSym(x, z, hw, hd, y0, y1, dir, c, base) { addRamp(x, z, hw, hd, y0, y1, dir, c, base); addRamp(-x, -z, hw, hd, y0, y1, OPP[dir], c, base); }
 
-/* ---- CENTRE: the duel deck, its two access ramps, the grounded skybridge on 4 columns, and the aerial wall-run fin ---- */
-addBox(0, 0, 440, 260, 75, C.DECK);                                   // duel deck, x -440 .. 440, z -260 .. 260, top at 75
-addRamp(-600, 0, 160, 180, 0, 75, '+x', C.DECK);                      // W access ramp: x -760 .. -440, ascends east onto the deck
-addRamp(600, 0, 160, 180, 0, 75, '-x', C.DECK);                       // E access ramp: x 440 .. 760, ascends west onto the deck
+/* ======================= STORY 2: duel deck, citadels, sky-walkways ======================= */
+addBox(0, 0, 520, 300, 110, C.DECK);                                  // CENTRAL DUEL DECK x -520 .. 520, z -300 .. 300, top 110
+// 4 ground ramps (0 -> 110), 440 long (14 degrees), 190 wide each, flanking the walkway band (|z| < 110): W side ascends east, E side ascends west
+addRampSym(-740, 205, 220, 95, 0, 110, '+x', C.DECK);                 // x -960 .. -520, z 110 .. 300  (+ twin on the east side, z -300 .. -110)
+addRampSym(-740, -205, 220, 95, 0, 110, '+x', C.DECK);                // x -960 .. -520, z -300 .. -110 (+ twin on the east side, z 110 .. 300)
 
-addBox(0, 0, 90, 720, 185, C.BRIDGE, 165);                            // skybridge: z -720 .. 720, underside 165, top 185 (spans both pits)
-[[-75, -660], [75, -660], [-75, 660], [75, 660]].forEach(function (p) {
-  addBox(p[0], p[1], 18, 18, 165, C.STEEL);                           // 4 structural columns, from the floor to the bridge underside
+addBox(-1380, 0, 340, 460, 140, C.DECK);                              // WEST CITADEL x -1720 .. -1040, z -460 .. 460, top 140
+addBox(1380, 0, 340, 460, 140, C.DECK);                               // EAST CITADEL x 1040 .. 1720
+addRampSym(1920, 0, 200, 260, 0, 140, '-x', C.DECK);                  // wide outer ramps: x 1720 .. 2120, z -260 .. 260, 0 -> 140 (the west one is the twin)
+
+addBox(-780, 0, 260, 110, 130, C.BRIDGE, 110);                        // SKY-WALKWAYS y 110 .. 130, x -1040 .. -520, z -110 .. 110: deck (110) -> walkway (130) -> citadel (140)
+addBox(780, 0, 260, 110, 130, C.BRIDGE, 110);
+
+// second-story wall-run panels standing ON the citadel decks: y 140 .. 380 (240 tall), 560 long, along the highway at z = +-330
+addBoxSym(1380, -330, 280, 14, 380, C.WALL, 140);                     // east citadel north panel + west citadel south twin
+addBoxSym(1380, 330, 280, 14, 380, C.WALL, 140);                      // east citadel south panel + west citadel north twin
+
+/* ======================= STORY 3: sky platform, sky-ramps, fin ======================= */
+addBox(0, 0, 220, 220, 295, C.BRIDGE, 270);                           // UPPER SKY-CITADEL platform x +-220, z +-220, y 270 .. 295
+[[-195, -195], [195, -195], [-195, 195], [195, 195]].forEach(function (p) {
+  addBox(p[0], p[1], 20, 20, 270, C.STEEL, 110);                      // 4 tall corner columns: stand on the duel deck (110) and hold the platform underside (270)
 });
-addBox(0, 0, 12, 420, 365, C.WALL, 205);                              // aerial wall-run fin, floats 20 above the bridge: y 205 .. 365
+// AERIAL SKY-RAMPS: wedge underside 130 = the walkway top; they start on the walkway at |x| 760, pass over the deck edge and meet the platform top (295)
+// Each ramp covers only HALF of its walkway (z -10 .. 110 on the west, the twin z -110 .. 10 on the east), so the other half stays an open lane: the highway never gets cut.
+addRampSym(-490, 50, 270, 60, 130, 295, '+x', C.BRIDGE, 130);         // x -760 .. -220, z -10 .. 110 (the east one is the twin)
+addBox(0, 0, 12, 420, 495, C.WALL, 325);                              // crowning crimson aerial wall-run fin, floats 30 above the platform: y 325 .. 495, z +-420
 
-/* ---- NORTH + SOUTH staggered wall-run canyons (north built, south = point-symmetric twin flowing the other way), then launch pad + downhill speed ramp ---- */
-addBoxSym(-1050, -1080, 420, 14, 240, C.WALL);                        // W1  x -1470 .. -630 (outer lane)
-addBoxSym(-150, -760, 420, 14, 240, C.WALL);                          // W2  x  -570 ..  270 (inner lane)
-addBoxSym(750, -1080, 420, 14, 240, C.WALL);                          // W3  x   330 .. 1170 (outer lane)
+// 6 HIGH GOLD SKY-GRAPPLE ANCHORS, y 410 .. 445: N, S, NW, SE, NE, SW (point twins)
+addBoxSym(0, -1100, 48, 48, 445, C.SPEED, 410);                       // N + S
+addBoxSym(-1500, -700, 48, 48, 445, C.SPEED, 410);                    // NW + SE
+addBoxSym(1500, -700, 48, 48, 445, C.SPEED, 410);                     // NE + SW
 
-addBoxSym(1320, -920, 110, 160, 110, C.STEEL);                        // launch pad x 1210 .. 1430, z -1080 .. -760, top 110
-addRampSym(1320, -600, 160, 160, 0, 110, '-z', C.SPEED);              // downhill speed ramp z -760 .. -440: 110 at the pad edge, 0 at the south edge
+/* ======================= STORY 1: wall-run canyons + launch pads + speed ramps ======================= */
+// Lanes z = -920 (inner) and -1280 (outer), 360 apart; panels 840 long, 270 high, each overlapping the next by 200. North flows west -> east, the south twin east -> west.
+addBoxSym(-1100, -920, 420, 14, 270, C.WALL);                         // N1  x -1520 .. -680 (inner lane)
+addBoxSym(-460, -1280, 420, 14, 270, C.WALL);                         // N2  x -880 .. -40   (outer lane)
+addBoxSym(180, -920, 420, 14, 270, C.WALL);                           // N3  x -240 .. 600   (inner lane)
+addBoxSym(820, -1280, 420, 14, 270, C.WALL);                          // N4  x 400 .. 1240   (outer lane)
+addBoxSym(1440, -1280, 160, 160, 140, C.STEEL);                       // launch pad x 1280 .. 1600, z -1440 .. -1120, top 140
+addRampSym(1440, -900, 160, 220, 0, 140, '-z', C.SPEED);              // downhill speed ramp z -1120 .. -680: 140 at the pad edge, 0 at the south edge, aimed at the east citadel
 
-/* ---- WEST landmark: Industrial Helipad (steel) + ramp + low cover on deck + SW Industrial Arch ---- */
-addBox(-1380, 0, 280, 360, 95, C.STEEL);                              // helipad x -1660 .. -1100, z -360 .. 360, top 95
-addRamp(-1820, 0, 160, 200, 0, 95, '+x', C.STEEL);                    // x -1980 .. -1660, ascends east onto the helipad
-addBox(-1480, -180, 55, 45, 145, C.COVER, 95);                        // low cover on the deck: 50 tall (y 95 .. 145)
-addBox(-1280, 180, 55, 45, 145, C.COVER, 95);
-addBox(-1950, 1250, 160, 40, 260, C.STEEL, 220);                      // SW Industrial Arch: lintel y 220 .. 260 on two legs
-addBox(-1950 - 140, 1250, 20, 40, 220, C.STEEL);
-addBox(-1950 + 140, 1250, 20, 40, 220, C.STEEL);
-
-/* ---- EAST landmark: Limestone Atrium + ramp + low cover on deck + NE Communications Spire with a saffron beacon ---- */
-addBox(1380, 0, 280, 360, 95, C.DECK);                                // atrium x 1100 .. 1660, z -360 .. 360, top 95
-addRamp(1820, 0, 160, 200, 0, 95, '-x', C.DECK);                      // x 1660 .. 1980, ascends west onto the atrium
-addBox(1480, 180, 55, 45, 145, C.COVER, 95);                          // low cover on the deck (point twins of the west pair)
-addBox(1280, -180, 55, 45, 145, C.COVER, 95);
-addBox(1950, -1250, 42, 42, 440, C.STEEL);                            // NE Communications Spire shaft
-addBox(1950, -1250, 48, 48, 465, C.SPEED, 440);                       // saffron beacon cap sits on the spire top
-
-/* ---- CORNERS: 4 swing pillars ---- */
-addPillarSym(1680, -1220, 300, C.PILLAR, 38);
-addPillarSym(1680, 1220, 300, C.PILLAR, 38);
+/* ======================= corners: grapple towers + swing pillars ======================= */
+[[1950, -1250], [1950, 1250]].forEach(function (p) {
+  addBoxSym(p[0], p[1], 42, 42, 460, C.STEEL);                        // 4 tall corner grapple towers
+  addBoxSym(p[0], p[1], 48, 48, 485, C.SPEED, 460);                   // gold cap sits on the tower top
+});
+addPillarSym(1700, -1000, 360, C.PILLAR, 40);                         // 4 tall swing pillars
+addPillarSym(1700, 1000, 360, C.PILLAR, 40);
 
 export var DISTRICT_MAP = {
   name: 'District',
   rect: { hw: 2200, hd: 1500, lip: 20 },                         // low perimeter coping (visual only); nothing but spawns in the outer ring
 
-  // 6 spawns, y = 0, each >= 200 clear of every hole / box / pillar / ramp footprint (validateMap checks it); all on the open runout avenues.
+  // 6 spawns, y = 0, each >= 260 clear of every hole / box / ramp / pillar footprint, floating ones included (validateMap checks it); all on open ground.
   spawns: [
-    { x: -2060, y: 0, z: -650 },
-    { x: 2060,  y: 0, z: 650 },
-    { x: -2060, y: 0, z: 650 },
-    { x: 2060,  y: 0, z: -650 },
-    { x: -450,  y: 0, z: -1360 },
-    { x: 450,   y: 0, z: 1360 }
+    { x: 2100,  y: 0, z: -700 },    // E avenue
+    { x: -2100, y: 0, z: 700 },     // W avenue (twin)
+    { x: 2100,  y: 0, z: 700 },     // E avenue
+    { x: -2100, y: 0, z: -700 },    // W avenue (twin)
+    { x: 900,   y: 0, z: -800 },    // north-east of the pit, between the canyon and the east citadel
+    { x: -900,  y: 0, z: 800 }      // south-west (twin)
   ],
 
   pillars: pillars,
   boxes: boxes,
 
   holes: [
-    { x: 0, z: -460, hw: 380, hd: 140 },       // ring-out skylight pit north of the duel deck
-    { x: 0, z: 460, hw: 380, hd: 140 }         // ring-out skylight pit south of the duel deck
+    { x: 0, z: -540, hw: 420, hd: 140 },       // ring-out skylight pit north of the duel deck (z -680 .. -400)
+    { x: 0, z: 540, hw: 420, hd: 140 }         // ring-out skylight pit south of the duel deck (z 400 .. 680)
   ],
 
   ramps: ramps
