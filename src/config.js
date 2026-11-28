@@ -166,7 +166,11 @@ export const MELEE = {
   uppercutPop: 220,    // old units / s (5.5 m / s): minimum upward speed YOU get from an uppercut (you rise out of the slide with it)
   diveSpeed: 880,      // old units / s (22.0 m / s): downward speed held during an Air Dive until touchdown
   diveRadius: 120,     // old units (3.0 m): radius of the shockwave ring on touchdown (measured to the target's capsule axis)
-  diveDmg: 45,         // damage of the shockwave (a regular block / parry / dodge still applies)
+  diveMinHeight: 88,   // old units (2.2 m): an Air Dive needs at least this much clear air under your feet (a plain standing jump peaks at 72, so it can never slam)
+  diveDmgMin: 35,      // shockwave damage at a drop of diveMinHeight (a regular block / parry / dodge still applies)
+  diveDmgMax: 65,      // shockwave damage at a drop of diveMaxHeight or more (high grapple / tower dives)
+  diveMaxHeight: 320,  // old units (8.0 m): the drop where the damage scaling tops out
+  diveKnockScale: 0.25,// the shockwave knockback grows linearly from x1 (min drop) to x(1 + diveKnockScale) (max drop)
   diveKnock: 560,      // old units / s (14 m / s): horizontal knockback of the shockwave, straight away from the impact point
   diveKnockUp: 0.5,    // upward launch = diveKnockUp * the horizontal shockwave knockback
   diveVertical: 80,    // old units (2.0 m): max vertical gap between the impact point (feet) and a target's feet for the shockwave to hit

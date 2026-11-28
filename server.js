@@ -201,7 +201,7 @@ io.on('connection', (socket) => {
     sliding: false, dashing: false, wallRunning: false, grappleActive: false, grappleAnchor: null, ragdoll: false,
     ko: 0, ping: 0, lastState: 0, respawnPending: false,
     hp: MAX_HP, maxHp: MAX_HP, dead: false, lastHitBy: null, lastHitAt: 0, lastDamageAt: 0, lastSlash: 0,
-    slidingAt: 0, divingAt: 0,                                                                             // Slice M3: last time the client reported sliding / announced an Air Dive
+    slidingAt: 0, divingAt: 0, divingY: 0,                                                                             // Slice M3: last time the client reported sliding / announced an Air Dive
     parrying: false, perfectParry: false, dodging: false, parryStart: 0, dodgeStart: 0, stunUntil: 0,   // Slice M2: guard / Phase-Dodge flags (validated in 'state'), rising-edge times, attacker stagger
   };
   players.set(id, p);
@@ -263,7 +263,7 @@ io.on('connection', (socket) => {
     // contextual move: an uppercut is only believed shortly after the client reported sliding; 'slam' = an Air Dive started (the damage comes with the touchdown 'slam')
     const type = d.type === 'slam' ? 'slam' : d.type === 'uppercut' && now - p.slidingAt < 400 ? 'uppercut' : 'slash';
     if (type === 'slam') {
-      p.divingAt = now;
+      p.divingAt = now; p.divingY = p.y;                                           // remember the height the dive started from (last reported feet y)
       socket.to('game').emit('slashFx', { id, yaw: r3(Math.atan2(num(d.dir && d.dir.x, 0, 10), num(d.dir && d.dir.z, 1, 10))), type });
       return;
     }
@@ -283,13 +283,19 @@ io.on('connection', (socket) => {
     let x = num(d.x, p.x, 1000), y = num(d.y, p.y, 1000), z = num(d.z, p.z, 1000);
     if (Math.hypot(x - p.x, z - p.z) > 6 || Math.abs(y - p.y) > 6) { x = p.x; y = p.y; z = p.z; }   // the claim must be near where the server last saw you (state packets are 30 Hz)
     io.to('game').emit('slamFx', { attackerId: id, x: r3(x), y: r3(y), z: r3(z) });
-    const R = MELEE.diveRadius * SCALE, V = MELEE.diveVertical * SCALE, knock = MELEE.diveKnock * SCALE;
+    // drop height scales the shockwave: damage diveDmgMin (at diveMinHeight) -> diveDmgMax (at diveMaxHeight and above), knockback x1 -> x(1 + diveKnockScale).
+    // Measured on the server (dive start y -> touchdown y); a client-claimed `dropHeight` (metres) can only lower it.
+    let drop = Math.max(0, p.divingY - y);
+    if (typeof d.dropHeight === 'number' && Number.isFinite(d.dropHeight)) drop = Math.min(drop, Math.max(0, d.dropHeight) + 0.5);
+    const hMin = MELEE.diveMinHeight * SCALE, hMax = MELEE.diveMaxHeight * SCALE, ht = clamp01((drop - hMin) / (hMax - hMin));
+    const diveDmg = Math.round(lerp(MELEE.diveDmgMin, MELEE.diveDmgMax, ht));
+    const R = MELEE.diveRadius * SCALE, V = MELEE.diveVertical * SCALE, knock = MELEE.diveKnock * SCALE * (1 + MELEE.diveKnockScale * ht);
     for (const q of joinedPlayers()) {
       if (q.id === id || q.dead || q.ragdoll || q.respawnPending) continue;
       const dx = q.x - x, dz = q.z - z, dist = Math.hypot(dx, dz);
       if (dist > R || Math.abs(q.y - y) >= V) continue;
       const ux = dist > 0.05 ? dx / dist : Math.sin(p.yaw), uz = dist > 0.05 ? dz / dist : Math.cos(p.yaw);
-      strike(p, q, MELEE.diveDmg, { x: r3(ux * knock), y: r3(knock * MELEE.diveKnockUp), z: r3(uz * knock) }, 'slam', now);
+      strike(p, q, diveDmg, { x: r3(ux * knock), y: r3(knock * MELEE.diveKnockUp), z: r3(uz * knock) }, 'slam', now);
     }
   });
 

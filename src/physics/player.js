@@ -36,6 +36,8 @@ export function createPlayerState() {
            mantleT: 0,         // s left of the mantle forward-step window (see MANTLE)
            attackType: 'slash', // Slice M3: what the current / last Left-Click was: 'slash' | 'uppercut' (sliding) | 'slam' (falling); drives the blade animation + the server request
            diving: false,      // Air Dive in progress: vy is held at -MELEE.diveSpeed until touchdown
+           diveStartY: 0,      // metres: feet height when the dive started
+           dropHeight: 0,      // metres fallen during the last dive, set on touchdown together with slamLanded (the server derives the same number itself)
            slamLanded: false,  // set on the tick the dive touches down; main.js emits 'slam' to the server and clears it
            attackT: 0, attackCd: 0, attackYaw: 0,                  // melee: s left of the blade swing (MELEE.attackTime), cooldown (MELEE.cooldown), yaw the pod faces during the swing
            lungeT: 0, lungeX: 0, lungeZ: 1, lungeV: 0, lungePre: 0, // magnetic lunge: s left, direction, lunge speed (m / s), the momentum to hand back afterwards (m / s)
@@ -120,7 +122,7 @@ export function stepPlayer(s, inp, ctx) {
   if (s.locked) inp = IDLE_INPUT;                             // stunned / frozen: no steering, jumps, dashes or slides (knockback keeps its velocity)
   s.sfx.length = 0;                                           // this tick's sound events (main.js plays them right after the step)
   const grounded = ctx.player.grounded;
-  if (s.diving && grounded) { s.diving = false; s.slamLanded = true; }   // Air Dive touchdown: main.js sends 'slam' (the server owns the shockwave)
+  if (s.diving && grounded) { s.diving = false; s.slamLanded = true; s.dropHeight = Math.max(0, s.diveStartY - feetPos(ctx).y); }   // Air Dive touchdown: main.js sends 'slam' (the server owns the shockwave)
   // A landing needs a real stretch in the air. Rapier's grounded flag can drop for a single tick while running on flat
   // ground (the resting push into the floor is smaller than the controller's skin), and that must not open a b-hop window.
   const landed = grounded && !s.wasGrounded && s.airT >= BHOP.minAir;
@@ -297,15 +299,15 @@ export function stepPlayer(s, inp, ctx) {
       }
     }
 
-    // contextual move: sliding -> Uppercut (rising slash), falling -> Air Dive Slam, otherwise the normal slash
+    // contextual move: sliding -> Uppercut (rising slash), falling from >= MELEE.diveMinHeight -> Air Dive Slam, otherwise the normal slash
     let type = 'slash';
     if (s.sliding) type = 'uppercut';
-    else if (!grounded && s.vy < -4 && !grappling && !s.wallRunning) type = 'slam';
+    else if (!grounded && s.vy < -3.0 && !grappling && !s.wallRunning && groundGap(ctx, m(MELEE.diveMinHeight)) >= m(MELEE.diveMinHeight)) type = 'slam';   // needs >= 2.2 m of air under the feet: a standing jump just slashes
     s.attackType = type;
     if (type === 'uppercut') {                                // clear the slide into a rising pop (the forward lunge below still applies)
       s.sliding = false; s.vy = Math.max(s.vy, m(MELEE.uppercutPop)); launched = true; s.coyote = 0;
     } else if (type === 'slam') {                             // dive: straight down at diveSpeed until touchdown (any dash is cancelled)
-      s.diving = true; s.vy = -m(MELEE.diveSpeed); s.dashT = 0;
+      s.diving = true; s.diveStartY = feetPos(ctx).y; s.vy = -m(MELEE.diveSpeed); s.dashT = 0;
     }
     s.parryT = 0;                                             // swinging drops the guard
     s.attackT = MELEE.attackTime; s.attackCd = MELEE.cooldown; s.attackYaw = Math.atan2(dirX, dirZ);
