@@ -11,7 +11,7 @@
 
 // MAX_FLOW_SPEED (below) is the soft aerodynamic ceiling on horizontal speed.
 import { STEP, SCALE, m, PUPPET, RUN, MOVE, JUMP, BHOP, DASH, SLIDE, WALLRUN, GRAPPLE, MANTLE, MELEE, PARRY } from '../config.js';
-import { movePlayer, hasHeadroom, detectWall, groundGap, raycastGrapple, feetPos, checkLedgeMantle } from './world.js';
+import { movePlayer, hasHeadroom, detectWall, groundGap, groundNormal, raycastGrapple, feetPos, checkLedgeMantle } from './world.js';
 
 // Soft aerodynamic speed ceiling, old units / s (Titanfall 2 "flow" zone). Horizontal speed above it bleeds back toward it
 // (see the end of the horizontal section in stepPlayer), so grapple slingshots and b-hop chains top out around 760 instead of running away.
@@ -22,7 +22,7 @@ export const IDLE_INPUT = Object.freeze({ ax: 0, az: 0, moving: false, fwd: fals
 
 export function createPlayerState() {
   return { vx: 0, vz: 0, vy: 0, facing: 0, runT: 0, isIt: false, locked: false, wallHit: false, jumpBuf: 0, coyote: 0,
-           sliding: false, crouching: false, downhill: false, slideBoostCd: 0, height: m(PUPPET.height),   // crouching: slow Shift on the ground (SLIDE.crouchSpeed, no boost); downhill: the last move went down a slope
+           sliding: false, crouching: false, downhill: false, slideBoostCd: 0, height: m(PUPPET.height),   // crouching: slow Shift on the ground (SLIDE.crouchSpeed, no boost); downhill: grounded on a real slope (groundNormal.y < 0.985) with the velocity pointing down it
            wasGrounded: true, airT: 0, bhopTimer: 0, bhopChain: 0,
            dashT: 0, dashCd: 0, dashX: 0, dashZ: 1, dashSpeed: 0,
            dashElapsed: 0,     // s since the current dash started (the server treats the first DASH.dodgeIframes s as Phase-Dodge i-frames)
@@ -333,7 +333,8 @@ export function stepPlayer(s, inp, ctx) {
   if (jumped || launched || dashing || s.wallRunning || grappling) { s.sliding = false; s.crouching = false; }
   else if (!inp.slide || (!grounded && s.coyote <= 0)) { s.sliding = false; s.crouching = false; }   // releasing Shift / leaving the ground ends both
   else if (s.sliding) {
-    // a slide that has run out of speed on flat ground (and is not inside the b-hop landing window) settles into a crouch: no endless drifting
+    // a slide that has run out of speed on flat ground (and is not inside the b-hop landing window) settles into a crouch: no endless drifting.
+    // `downhill` is true only on a real slope (groundNormal) with the velocity pointing down it, so a flat floor always lets the slide decay into a crouch.
     if (grounded && s.bhopTimer <= 0 && !s.downhill && Math.hypot(s.vx, s.vz) < m(SLIDE.exitSpeed)) { s.sliding = false; s.crouching = true; }
   } else if (s.crouching) {
     // crouch-walking down a slope turns into a slide (no boost: the slope itself accelerates it)
@@ -481,10 +482,16 @@ export function stepPlayer(s, inp, ctx) {
   // lunge over: hand the incoming speed back along the slash direction (unless a wall stopped the lunge, then the clamped velocity stands)
   if (lungeDone && got >= want * 0.7) { s.vx = s.lungeX * s.lungePre; s.vz = s.lungeZ * s.lungePre; }
 
-  // downhill slide: the move went DOWN (c.y < -1e-4) while grounded, so add slopeAccel along the slide direction (ramps = speed).
-  // (-c.y must also beat 2 % of the horizontal travel, which ignores the sub-millimetre jitter of the ground stick on flat floors.)
-  s.downhill = grounded && c.y < -1e-4 && -c.y > got * 0.02 && got > m(SLIDE.minSpeed) * STEP;   // read next tick: keeps a slide going / promotes a crouch on a slope
-  if (s.sliding && grounded && c.y < -1e-4 && -c.y > got * 0.02) {
+  // downhill slide: judged from the TRUE surface normal under the capsule, never from the vertical part of the move. (The MOVE.stick skin settling
+  // pulls every grounded tick a little downward even on a perfectly flat floor, which used to read as "downhill" and accelerate the slide forever.)
+  // A flat floor has normal.y >= 0.995, a real ramp (>= 10 degrees) <= 0.985. The horizontal part of the normal points DOWNHILL, so the velocity is going
+  // down the slope only when its dot product with (n.x, n.z) is positive. Flat ground therefore never sets `downhill` and never adds slopeAccel:
+  // the slide decays under SLIDE.friction and settles into a crouch below SLIDE.exitSpeed (see the slide / crouch state above, read next tick).
+  const n = groundNormal(ctx);
+  const onSlope = grounded && n.y < 0.985;
+  const downSlope = onSlope && (s.vx * n.x + s.vz * n.z) > 0.05;
+  s.downhill = downSlope && got > m(SLIDE.minSpeed) * STEP;   // read next tick: keeps a slide going / promotes a crouch on a slope
+  if (s.sliding && downSlope) {
     const v = Math.hypot(s.vx, s.vz);
     const dx = v > 1e-3 ? s.vx / v : Math.sin(s.facing), dz = v > 1e-3 ? s.vz / v : Math.cos(s.facing);
     const a = m(SLIDE.slopeAccel) * STEP;

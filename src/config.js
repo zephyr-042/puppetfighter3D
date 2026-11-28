@@ -111,12 +111,12 @@ export const GRAPPLE = {
 // ---- crouch-slide (old units). Titanfall 2 flow: low friction, hard steering, a flat boost on entry, downhill acceleration.
 export const SLIDE = {
   height: 40,          // capsule height while sliding (40 units = 1.0 m; standing is PUPPET.height = 72 = 1.8 m)
-  friction: 0.91,      // speed multiplier per SECOND while sliding (applied as friction^dt each tick): slides carry momentum far
+  friction: 0.72,      // speed multiplier per SECOND while sliding (applied as friction^dt each tick): a snappy glide burst on flat ground that then settles into a crouch (slide-hops inside BHOP.window skip it and keep full speed)
   steerAccel: 240,     // units / s^2 of sideways steering toward the held keys (carves the slide, adds no speed)
   boostAdd: 115,       // units / s ADDED to the horizontal speed on slide entry (along the velocity, or the facing when slow)
   maxBoostSpeed: 680,  // the boost never pushes you above this; a faster entry (b-hop / dash / ramp speed) is kept as is, never reduced
   boostCd: 0.75,       // s after a boost before the next slide entry can boost again (no boost spam from a standstill)
-  slopeAccel: 650,     // units / s^2 added along the slide direction while sliding DOWNHILL (grounded and the move went down: c.y < -1e-4)
+  slopeAccel: 650,     // units / s^2 added along the slide direction while sliding DOWNHILL (grounded on a real slope, normal.y < 0.985, with the velocity pointing down it)
   minSpeed: 60,        // units / s: below this the facing direction is used for the boost, and steering may still creep up to this speed
   resize: 14,          // how fast the capsule height eases between standing and sliding (1 / s)
   entryMinSpeed: 230,  // old units / s: you must be running near full speed (or landing from the air at >= 170, or on a downhill) to START a slide; below this Shift = a plain crouch

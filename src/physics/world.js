@@ -244,6 +244,22 @@ export function groundGap(ctx, maxDist) {
   return h ? Math.max(0, h.timeOfImpact - half) : Infinity;
 }
 
+// True surface normal under the player (unit vector, pointing up out of the surface). Casts ONE short ray straight down from the
+// capsule centre, reaching half (= halfCyl + radius, the centre-to-feet distance) + 0.15 m, against static geometry only (WALL_GROUP).
+// A flat floor returns normal.y >= 0.995 (the controller's skin / MOVE.stick settling never tilts it), a real ramp (>= 10 degrees)
+// returns normal.y <= 0.985. The horizontal part (x, z) of the normal points DOWNHILL, so a velocity with a positive dot product against
+// it is moving down the slope. Returns { x: 0, y: 1, z: 0 } when nothing is hit (airborne / over a hole) or the normal is degenerate.
+export function groundNormal(ctx) {
+  const { RAPIER, world, player } = ctx, t = player.body.translation();
+  const half = player.halfCyl + player.radius;
+  const ray = new RAPIER.Ray({ x: t.x, y: t.y, z: t.z }, { x: 0, y: -1, z: 0 });
+  const h = world.castRayAndGetNormal(ray, half + 0.15, true, undefined, WALL_RAY_GROUPS, player.collider);
+  if (!h) return { x: 0, y: 1, z: 0 };
+  const n = h.normal, l = Math.hypot(n.x, n.y, n.z);
+  if (l < 1e-6) return { x: 0, y: 1, z: 0 };                  // a ray that starts inside a collider reports no usable normal
+  return { x: n.x / l, y: n.y / l, z: n.z / l };
+}
+
 // Grapple shot. origin / dir are world-space metres ({x, y, z}; dir need not be unit length), maxDist in metres.
 // Checks static level geometry (WALL_GROUP) with a real ray, and every OTHER capsule (not ownerIdx, not skip(idx)) within
 // GRAPPLE.playerRange with a ray-vs-capsule test fattened by GRAPPLE.aimPad (aim assist). The closest hit wins; a player
