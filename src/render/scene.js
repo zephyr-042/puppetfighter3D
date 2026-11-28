@@ -5,12 +5,15 @@
 // speed-charged (blade glow 0.6 -> 2.4 and a longer glow streak as horizontal speed climbs 300 -> 760 units / s, i.e. toward the full 75 damage slash) and leans up to 0.22 rad into its
 // movement / dodge direction. The pod is also the ragdoll: when the pod tumbles, physics/ragdoll.js drives this very same `pod` group (one rigid capsule, no limbs), so nothing ever shape-shifts.
 // Also the red "IT" cone marker and the glowing grapple tether (setGrapple).
-// LOOK: bright, crisp, sunlit architecture (Mirror's Edge / Overwatch). A clear morning sky gradient, light horizon mist, balanced daylight (cool hemisphere fill + a warm-white
-// sun high in the sky), true-to-life palette colours and PROCEDURAL surface textures generated once at startup (poured-concrete floor with expansion seams, brushed panel texture on
-// every box / ramp). Runner-vision accents are now PAINTED architectural bands (white / deep-cobalt stripes on wall-run panels, white face panels on billboards, teal bands on
-// spires and pillars, gold chevrons on the speed ramps): ordinary matte standard materials, nothing emissive. No background geometry at all: just the sky gradient and the mist.
+// LOOK: bright, crisp, sunlit architecture (Mirror's Edge / War Games daylight). ~85 % calm neutral limestone / slate / concrete, ~15 % runner-vision accents. A clear morning sky
+// gradient, bright horizon mist, balanced daylight (cool hemisphere fill + a warm-white sun high in the sky) and PROCEDURAL surface textures generated once at startup (warm
+// poured-concrete floor with expansion seams, brushed panel texture on every box / ramp). Runner-vision accents are PAINTED bands: crimson-terracotta strips on every wall-run panel,
+// saffron bands on the swing pillars, deep-amber chevrons on the saffron speed ramps. Ordinary matte standard materials, nothing emissive.
+// The only background geometry is a distant CITY SKYLINE: ONE InstancedMesh of ~48 towers in a 135-360 m ring (no shadows) that fades into the horizon mist, so the roof reads as
+// suspended over a real sunlit city.
 // Meshes are built from the same map data and helpers (game/maps.js) as the physics colliders, so they always match.
 // Accent bands are collected into a handful of InstancedMesh batches (one draw call per colour / shape, no shadows) to keep District at 60+ FPS.
+// The slash trail and the dive-slam shockwave use NORMAL blending (additive washes out on the bright floor); the speed streak and guard barrier stay additive.
 // Loads after: config.js, game/maps.js
 
 import * as THREE from 'three';
@@ -18,13 +21,14 @@ import { m, PUPPET, CAM, MAP, JUICE } from '../config.js';
 import DISTRICT_MAP, { PALETTE, floorSlabs, rampSpan, boxSpan } from '../game/maps.js';
 
 // ---- look tuning (everything the daylight mood depends on lives here) --------------------------------------------------------
-const TRIM_COLOR = 0xaeb9c5, TILE_M = 5, PANEL_M = 2.5;                    // light steel coping trim; floor grid tile (metres); panel texture tile on boxes / ramps (metres)
+const TRIM_COLOR = 0xb4aea4, TILE_M = 5, PANEL_M = 2.5;                    // light steel coping trim; floor grid tile (metres); panel texture tile on boxes / ramps (metres)
 const SKY_STOPS = [[0, '#4b92db'], [0.5, '#9ecfff'], [1, '#e8f3fc']];      // zenith blue -> mid-sky -> pale horizon mist (screen space, top -> bottom)
-const FOG = { color: 0xdbeaf7, near: 240, far: 1150 };                      // light atmospheric horizon mist (metres)
-const SUN = { color: 0xfffcf5, intensity: 1.65, offset: [34, 70, 24] };     // warm-white sun, ~60 degrees up: short, crisp shadows
-const HEMI = { sky: 0xf0f7ff, ground: 0x8a96a3, intensity: 1.85 };          // cool daylight fill: shadowed faces stay clean and readable
+const FOG = { color: 0xdbeaf7, near: 130, far: 420 };                       // bright morning horizon mist (metres): the roof (<= ~135 m end to end) stays crisp, the skyline fades into it
+const SUN = { color: 0xfffdf7, intensity: 1.65, offset: [34, 70, 24] };     // warm-white sun, ~60 degrees up: short, crisp shadows
+const HEMI = { sky: 0xf4f9ff, ground: 0x8d99a6, intensity: 1.85 };          // cool daylight fill: shadowed faces stay clean and readable
 const EXPOSURE = 0.9;                                                       // used only with the neutral tone mapper (hue-preserving highlight roll-off); see createScene
-const PAINT = { white: 0xf8fafc, cobalt: 0x1e3a8a, teal: 0x14b8a6, gold: 0xb45309 };   // painted accent colours (gold = deep saffron, so chevrons read on the saffron ramps)
+const PAINT = { white: 0xf8fafc, crimson: 0xe04f3e, gold: 0xf59e0b, chev: 0xb45309 };   // painted accents: crimson-terracotta runner-vision strips, saffron bands, deep-amber chevrons (read on the saffron ramps)
+const SKYLINE = { count: 48, rMin: 135, rMax: 360, baseY: -140, topNear: -25, topFar: 150, wMin: 14, wMax: 40 };   // metres: ring of towers; the base sits far below the roof, tops climb with distance
 const STRIP_PROUD = 0.06;                                                   // band thickness along the face normal (half of it stands proud of the surface)
 
 // map colours are [r, g, b] in 0-255 (sRGB)
@@ -32,38 +36,36 @@ const rgb = (c) => new THREE.Color().setRGB(c[0] / 255, c[1] / 255, c[2] / 255, 
 
 // Finish per palette entry: [roughness, metalness]. Everything is matte-ish architecture; metalness stays low because there is no environment map.
 const SURFACE = new Map([
-  [PALETTE.DECK, [0.70, 0.12]],      // slate platform
-  [PALETTE.COVER, [0.90, 0.00]],     // limestone / concrete
+  [PALETTE.DECK, [0.85, 0.02]],      // warm limestone
+  [PALETTE.STEEL, [0.45, 0.30]],     // anodized gunmetal
+  [PALETTE.COVER, [0.92, 0.00]],     // weathered concrete
   [PALETTE.BRIDGE, [0.50, 0.15]],    // titanium white
-  [PALETTE.BILL, [0.60, 0.08]],      // coral painted steel
-  [PALETTE.WALL, [0.60, 0.08]],      // cobalt panels
-  [PALETTE.PAD, [0.55, 0.12]],       // saffron
+  [PALETTE.WALL, [0.65, 0.10]],      // deep slate panels
   [PALETTE.SPEED, [0.55, 0.12]],     // saffron
-  [PALETTE.TOWER, [0.70, 0.18]],     // slate-charcoal
-  [PALETTE.PILLAR, [0.70, 0.18]]
+  [PALETTE.PILLAR, [0.60, 0.25]]     // slate steel
 ]);
 const surface = (c) => SURFACE.get(c) || [0.85, 0.10];
 
 // ---- procedural textures: drawn once, zero external image assets -----------------------------------------------------------
 const makeRnd = (seed) => () => (seed = (seed * 16807) % 2147483647) / 2147483647;     // tiny deterministic PRNG: same look every load
 
-// Poured architectural concrete: light grey, fine surface grain, crisp dark-slate expansion seams on the tile border (and a faint half-tile guide).
+// Poured architectural concrete: warm light grey (#d6d2ca), fine surface grain, crisp expansion seams on the tile border (and a faint half-tile guide).
 function makeFloorTexture() {
   const S = 256, rnd = makeRnd(1337);
   const cv = document.createElement('canvas'); cv.width = cv.height = S;
   const g = cv.getContext('2d');
-  g.fillStyle = '#c8d0d8'; g.fillRect(0, 0, S, S);
+  g.fillStyle = '#d6d2ca'; g.fillRect(0, 0, S, S);
   for (let i = 0; i < 2600; i++) {                                                           // grain: tiny light / dark speckles
     const x = rnd() * S, y = rnd() * S, a = 0.03 + rnd() * 0.05;
-    g.fillStyle = rnd() < 0.5 ? 'rgba(255,255,255,' + a.toFixed(3) + ')' : 'rgba(110,122,136,' + a.toFixed(3) + ')';
+    g.fillStyle = rnd() < 0.5 ? 'rgba(255,255,255,' + a.toFixed(3) + ')' : 'rgba(128,120,108,' + a.toFixed(3) + ')';
     g.fillRect(x, y, 1 + (rnd() < 0.2 ? 1 : 0), 1);
   }
   for (let i = 0; i < 40; i++) {                                                             // a few soft trowel marks
     const x = rnd() * S, y = rnd() * S, r = 14 + rnd() * 34;
     g.fillStyle = 'rgba(255,255,255,0.025)'; g.beginPath(); g.arc(x, y, r, 0, 6.283); g.fill();
   }
-  g.fillStyle = 'rgba(154,165,177,0.35)'; g.fillRect(0, S / 2, S, 1); g.fillRect(S / 2, 0, 1, S);   // faint half-tile guide
-  g.fillStyle = '#9aa5b1'; g.fillRect(0, 0, S, 2); g.fillRect(0, 0, 2, S);                   // expansion seam on the tile border
+  g.fillStyle = 'rgba(160,153,141,0.35)'; g.fillRect(0, S / 2, S, 1); g.fillRect(S / 2, 0, 1, S);   // faint half-tile guide
+  g.fillStyle = '#a39c90'; g.fillRect(0, 0, S, 2); g.fillRect(0, 0, 2, S);                   // expansion seam on the tile border
   g.fillStyle = 'rgba(255,255,255,0.45)'; g.fillRect(0, 2, S, 1); g.fillRect(2, 0, 1, S);    // lit edge just inside the seam
   const t = new THREE.CanvasTexture(cv);
   t.wrapS = t.wrapT = THREE.RepeatWrapping; t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4;
@@ -223,7 +225,7 @@ function createPuppet(scene, color) {
   const bladeMat = new THREE.MeshStandardMaterial({ color: base.clone().multiplyScalar(0.3), emissive: base, emissiveIntensity: BLADE_EMISSIVE, roughness: 0.3, metalness: 0.1 });
   const edgeCol = base.clone().lerp(WHITE, 0.8), edgeMat = new THREE.MeshBasicMaterial({ color: edgeCol.clone(), toneMapped: false });
   const streakMat = new THREE.MeshBasicMaterial({ color: base.clone().lerp(WHITE, 0.35), transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false, fog: false });
-  const trailMat = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, toneMapped: false, fog: false });
+  const trailMat = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, depthWrite: false, blending: THREE.NormalBlending, side: THREE.DoubleSide, toneMapped: false, fog: false });   // normal blending: reads in daylight
 
   const pod = new THREE.Group(), mount = new THREE.Group();
   pod.add(mount);
@@ -252,7 +254,7 @@ function createPuppet(scene, color) {
   guardMesh.visible = false; guardMesh.frustumCulled = false; guardMesh.renderOrder = 3;
   mount.add(guardMesh);
 
-  const tc = base.clone().lerp(WHITE, 0.4);
+  const tc = base.clone().lerp(WHITE, 0.12);
   const trailGeo = makeTrail(tc), trailCol = trailGeo.getAttribute('color'), trail = new THREE.Mesh(trailGeo, trailMat);
   trail.visible = false; trail.frustumCulled = false; trail.renderOrder = 2;
   mount.add(trail);
@@ -429,8 +431,8 @@ export function createScene() {
   scene.background = skyTex;
   scene.fog = new THREE.Fog(FOG.color, FOG.near, FOG.far);          // light atmospheric horizon mist (metres)
 
-  // far = 400 m: the roof is ~115 m x 80 m and there is no background geometry, so nothing lives beyond that
-  const camera = new THREE.PerspectiveCamera(CAM.fov, window.innerWidth / window.innerHeight, 0.1, 400);
+  // far = 640 m: the roof is 110 m x 75 m, but the skyline ring reaches 360 m from the centre (+ tower size, + the player standing near the roof edge)
+  const camera = new THREE.PerspectiveCamera(CAM.fov, window.innerWidth / window.innerHeight, 0.1, 640);
 
   // lights: the sun follows the player (see setFocus) so one shadow map covers the area around you
   scene.add(new THREE.HemisphereLight(HEMI.sky, HEMI.ground, HEMI.intensity));   // cool daylight fill: shadowed faces keep their colour and shape
@@ -475,7 +477,7 @@ export function createScene() {
   }
 
   // ---- painted accent bands: collected here, drawn as a few InstancedMesh batches at the end (no shadows, no extra materials per band)
-  const glow = { box: { white: [], cobalt: [], teal: [], gold: [] }, cyl: { teal: [], white: [] } };
+  const glow = { box: { white: [], crimson: [], chev: [] }, cyl: { gold: [] } };
   const gM = new THREE.Matrix4(), gP = new THREE.Vector3(), gS = new THREE.Vector3(), gQ = new THREE.Quaternion(), gE = new THREE.Euler();
   // kind 'box' = unit cube scaled to (sx, sy, sz); kind 'cyl' = unit cylinder scaled to (radius, height, radius). Centre (x, y, z) in metres.
   const strip = (kind, key, x, y, z, sx, sy, sz, q) => {
@@ -488,34 +490,20 @@ export function createScene() {
   };
 
   function accentBox(b) {
-    const sp = boxSpan(b), cx = m(b.x), cz = m(b.z), cy = m(sp.cy), hx = m(b.hw), hz = m(b.hd), H = m(sp.height), top = m(sp.top);
+    const sp = boxSpan(b), cx = m(b.x), cz = m(b.z), hx = m(b.hw), hz = m(b.hd), top = m(sp.top);
     if (b.c === PALETTE.WALL) {
-      // wall-run panels: a white crown line, a deep-cobalt band under it, a white run-height line and white end posts on BOTH faces, so a wall reads from either lane
-      const longX = hx >= hz, L = longX ? hx : hz, T = longX ? hz : hx;
+      // wall-run panels + the aerial fin: crimson-terracotta runner-vision strips on BOTH faces, so a wall reads from either lane: a crown line, a broad band under it,
+      // a run-height line and slim end posts (everything else stays calm slate)
+      const longX = hx >= hz, L = longX ? hx : hz, T = longX ? hz : hx, base = m(sp.y0);
       for (const side of [-1, 1]) {
         const n = side * T;
-        onFace(longX, cx, cz, 0, top - 0.14, n, 2 * L - 0.5, 0.14, STRIP_PROUD, 'white');
-        onFace(longX, cx, cz, 0, top - 0.52, n, 2 * L - 0.5, 0.46, STRIP_PROUD * 0.8, 'cobalt');
-        onFace(longX, cx, cz, 0, top * 0.36, n, 2 * L - 0.5, 0.08, STRIP_PROUD, 'white');
-        for (const end of [-1, 1]) onFace(longX, cx, cz, end * (L - 0.14), top / 2, n, 0.12, top - 0.5, STRIP_PROUD, 'white');
+        onFace(longX, cx, cz, 0, top - 0.14, n, 2 * L - 0.5, 0.14, STRIP_PROUD, 'crimson');
+        onFace(longX, cx, cz, 0, top - 0.52, n, 2 * L - 0.5, 0.40, STRIP_PROUD * 0.8, 'crimson');
+        onFace(longX, cx, cz, 0, base + (top - base) * 0.36, n, 2 * L - 0.5, 0.08, STRIP_PROUD, 'crimson');
+        for (const end of [-1, 1]) onFace(longX, cx, cz, end * (L - 0.14), (top + base) / 2, n, 0.12, top - base - 0.5, STRIP_PROUD, 'crimson');
       }
-    } else if (b.c === PALETTE.BILL) {
-      // billboards: a clean white face panel inside the coral frame, both sides
-      const longX = hx >= hz, L = longX ? hx : hz, T = longX ? hz : hx;
-      for (const side of [-1, 1]) onFace(longX, cx, cz, 0, cy, side * T, 2 * L * 0.94, H * 0.72, STRIP_PROUD, 'white');
-    } else if (b.c === PALETTE.TOWER) {
-      // spire bands near the top: a wide teal band above, a slim white one below (a hair wider than the shaft)
-      strip('box', 'teal', cx, top - 0.55, cz, 2 * hx + 0.07, 0.16, 2 * hz + 0.07);
-      strip('box', 'white', cx, top - 1.05, cz, 2 * hx + 0.07, 0.10, 2 * hz + 0.07);
-    } else if (b.c === PALETTE.PAD) {
-      // launch pad: white painted strips along the four top edges
-      const y = top + 0.02, w = 0.14, ix = 0.18;
-      strip('box', 'white', cx, y, cz - hz + ix, 2 * hx - 2 * ix, 0.05, w);
-      strip('box', 'white', cx, y, cz + hz - ix, 2 * hx - 2 * ix, 0.05, w);
-      strip('box', 'white', cx - hx + ix, y, cz, w, 0.05, 2 * hz - 2 * ix);
-      strip('box', 'white', cx + hx - ix, y, cz, w, 0.05, 2 * hz - 2 * ix);
     }
-    // (the saffron spire caps and every other piece stay clean: colour and brushed texture only)
+    // (steel, limestone, concrete, the titanium bridge and the saffron beacon cap stay clean: colour and brushed texture only)
   }
 
   // ---- boxes (bottom at y0, default 0 = on the floor; y0 > 0 floats). UVs are rescaled so the brushed panel texture is PANEL_M metres per tile on every face.
@@ -531,18 +519,17 @@ export function createScene() {
     accentBox(b);
   }
 
-  // ---- pillars (grab-able): round, base on the floor, plain painted slate with a teal + a white band near the top
+  // ---- pillars (grab-able): round, base on the floor, slate steel with one saffron band near the top (grab-me marker)
   for (const p of map.pillars) {
     const mesh = new THREE.Mesh(new THREE.CylinderGeometry(m(p.r), m(p.r), m(p.h), 28), matFor(p.c, false));
     mesh.position.set(m(p.x), m(p.h) / 2, m(p.z));
     mesh.castShadow = true; mesh.receiveShadow = true;
     scene.add(mesh);
     const r = m(p.r) + 0.035, top = m(p.h);
-    strip('cyl', 'teal', m(p.x), top - 0.5, m(p.z), r, 0.16, r);
-    strip('cyl', 'white', m(p.x), top - 1.0, m(p.z), r, 0.10, r);
+    strip('cyl', 'gold', m(p.x), top - 0.5, m(p.z), r, 0.22, r);
   }
 
-  // ---- ramps: solid wedges. A ramp may carry its own palette colour (r.c). C.SPEED ramps get white edge lines along both slope edges and gold chevrons that point downhill.
+  // ---- ramps: solid wedges. A ramp may carry its own palette colour (r.c). C.SPEED ramps get white edge lines along both slope edges and deep-amber chevrons that point downhill.
   const rampFallback = matFor(PALETTE.DECK);
   for (const r of map.ramps) {
     const geo = buildRampGeometry(r);
@@ -565,7 +552,7 @@ export function createScene() {
           const lx = tt + 0.5 * L * Math.cos(beta), lz = sg * 0.5 * L * Math.sin(beta);
           const px = m(s.cx) + dx * lx * Math.cos(ang) + ax * lz, pz = m(s.cz) + dz * lx * Math.cos(ang) + az * lz, py = y + lx * Math.sin(ang) + 0.012;
           qArm.setFromAxisAngle(Y_AXIS, -sg * beta);
-          strip('box', 'gold', px, py, pz, L, 0.05, 0.3, qBase.clone().multiply(qArm));
+          strip('box', 'chev', px, py, pz, L, 0.05, 0.3, qBase.clone().multiply(qArm));
         }
       }
     }
@@ -585,6 +572,29 @@ export function createScene() {
       inst.castShadow = false; inst.receiveShadow = false;
       scene.add(inst);
     }
+  }
+
+  // ---- distant city skyline: ONE InstancedMesh (one draw call) of SKYLINE.count towers in a ring SKYLINE.rMin..rMax metres round the arena centre. No shadows (neither cast nor
+  // received), flat pale colours via instanceColor, and the scene fog melts the far ones into the horizon mist. The base sits SKYLINE.baseY below the roof (a city street far below)
+  // and the tops climb with distance (topNear .. topFar relative to the roof), so near towers stay below eye level and the far skyline stands against the sky.
+  {
+    const rnd = makeRnd(20260), n = SKYLINE.count, tint = new THREE.Color(), mx = new THREE.Matrix4(), q = new THREE.Quaternion(), pos = new THREE.Vector3(), scl = new THREE.Vector3();
+    const geo = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);                // unit tower standing on y = 0
+    const skyline = new THREE.InstancedMesh(geo, new THREE.MeshLambertMaterial({ color: 0xffffff }), n);
+    const TONES = [0xc3cfdb, 0xd2dae3, 0xb4c2d1, 0xdfe4ea, 0xcdc8be, 0xa9b8c9];     // cool glass greys + a few warm limestone towers
+    for (let i = 0; i < n; i++) {
+      const ang = ((i + 0.15 + rnd() * 0.7) / n) * Math.PI * 2;                      // one tower per angular slot: an even ring with natural jitter
+      const k = rnd(), r = SKYLINE.rMin + (SKYLINE.rMax - SKYLINE.rMin) * k;
+      const w = SKYLINE.wMin + (SKYLINE.wMax - SKYLINE.wMin) * rnd(), d = SKYLINE.wMin + (SKYLINE.wMax - SKYLINE.wMin) * rnd();
+      const top = SKYLINE.topNear + (SKYLINE.topFar - SKYLINE.topNear) * Math.min(1, k * 0.75 + rnd() * 0.25);
+      q.setFromAxisAngle(Y_AXIS, rnd() * Math.PI);
+      mx.compose(pos.set(Math.cos(ang) * r, SKYLINE.baseY, Math.sin(ang) * r), q, scl.set(w, top - SKYLINE.baseY, d));
+      skyline.setMatrixAt(i, mx);
+      skyline.setColorAt(i, tint.setHex(TONES[Math.floor(rnd() * TONES.length)]));
+    }
+    skyline.instanceMatrix.needsUpdate = true; skyline.instanceColor.needsUpdate = true;
+    skyline.frustumCulled = false; skyline.castShadow = false; skyline.receiveShadow = false;
+    scene.add(skyline);
   }
 
   // ---- IT marker: ONE emissive red cone, tip down, hovering above whoever is IT (bobs a little)
@@ -645,12 +655,12 @@ export function createScene() {
   // ---- puppets: every pod is registered here so view.update(dt) can animate the floating blades, slash trails and hit flashes
   const puppets = [];
   function addPuppet(color) { const pu = createPuppet(scene, color); puppets.push(pu); return pu; }
-  // ---- shockwave rings (Air Dive Slam): a cyan ring + a gold inner ring + a faint disc expand over `dur` s to `radius` m on the floor, then remove themselves
+  // ---- shockwave rings (Air Dive Slam, NORMAL blending so they pop in daylight): a teal ring + a saffron inner ring + a faint disc expand over `dur` s to `radius` m on the floor, then remove themselves
   const shockRingGeo = new THREE.RingGeometry(0.8, 1, 64).rotateX(-Math.PI / 2), shockDiscGeo = new THREE.CircleGeometry(1, 48).rotateX(-Math.PI / 2);
   const shocks = [];
   function spawnShockwave(x, y, z, radius, dur = 0.3) {
-    const mk = (geo, hex) => { const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: hex, transparent: true, opacity: 0, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false, fog: false })); mesh.position.set(x, y + 0.06, z); mesh.scale.setScalar(0.05); mesh.frustumCulled = false; mesh.renderOrder = 4; scene.add(mesh); return mesh; };
-    shocks.push({ t: 0, dur, radius, ring: mk(shockRingGeo, 0x00f5d4), inner: mk(shockRingGeo, 0xffb000), disc: mk(shockDiscGeo, 0x00f5d4) });
+    const mk = (geo, hex) => { const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: hex, transparent: true, opacity: 0, side: THREE.DoubleSide, blending: THREE.NormalBlending, depthWrite: false, toneMapped: false, fog: false })); mesh.position.set(x, y + 0.06, z); mesh.scale.setScalar(0.05); mesh.frustumCulled = false; mesh.renderOrder = 4; scene.add(mesh); return mesh; };
+    shocks.push({ t: 0, dur, radius, ring: mk(shockRingGeo, 0x00c8b0), inner: mk(shockRingGeo, 0xf59e0b), disc: mk(shockDiscGeo, 0x00c8b0) });
   }
   function updateShocks(dt) {
     for (let i = shocks.length - 1; i >= 0; i--) {
